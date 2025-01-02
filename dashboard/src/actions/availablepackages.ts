@@ -1,11 +1,12 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2024 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import {
   AvailablePackageDetail,
   AvailablePackageReference,
+  GetAvailablePackageMetadatasResponse,
   GetAvailablePackageVersionsResponse,
-} from "gen/kubeappsapis/core/packages/v1alpha1/packages";
+} from "gen/kubeappsapis/core/packages/v1alpha1/packages_pb";
 import { ThunkAction } from "redux-thunk";
 import { ActionType, deprecated } from "typesafe-actions";
 import PackagesService from "../shared/PackagesService";
@@ -14,6 +15,7 @@ import {
   IReceivePackagesActionPayload as IReceiveAvailablePackageSummariesActionPayload,
   IStoreState,
 } from "../shared/types";
+import { handleErrorAction } from "./auth";
 
 const { createAction } = deprecated;
 
@@ -58,6 +60,14 @@ export const receiveSelectedAvailablePackageDetail = createAction(
 // Reset action
 export const resetSelectedAvailablePackageDetail = createAction("RESET_PACKAGE_VERSION");
 
+// Set custom defaults action
+export const setAvailablePackageDetailCustomDefaults = createAction(
+  "SET_AVAILABLE_PACKAGE_DETAIL_CUSTOM_DEFAULTS",
+  resolve => {
+    return (customDefault: string) => resolve({ customDefault });
+  },
+);
+
 // Request action
 export const requestSelectedAvailablePackageVersions = createAction(
   "REQUEST_SELECTED_AVAILABLE_PACKAGE_VERSIONS",
@@ -71,10 +81,23 @@ export const receiveSelectedAvailablePackageVersions = createAction(
   },
 );
 
+// Request action
+export const requestAvailablePackageMetadatas = createAction(
+  "REQUEST_SELECTED_AVAILABLE_PACKAGE_METADATAS",
+);
+
+// Receive action
+export const receiveAvailablePackageMetadatas = createAction(
+  "RECEIVE_SELECTED_AVAILABLE_PACKAGE_METADATAS",
+  resolve => {
+    return (metadatas: GetAvailablePackageMetadatasResponse) => resolve(metadatas);
+  },
+);
+
 // No reset action
 
 // ** Error actions **
-// for handling the erros thrown by the rest of the actions
+// for handling the errors thrown by the rest of the actions
 
 // Create action
 export const createErrorPackage = createAction("CREATE_ERROR_PACKAGE", resolve => {
@@ -90,14 +113,17 @@ const allActions = [
   resetAvailablePackageSummaries,
   requestSelectedAvailablePackageDetail,
   receiveSelectedAvailablePackageDetail,
+  setAvailablePackageDetailCustomDefaults,
   resetSelectedAvailablePackageDetail,
   requestSelectedAvailablePackageVersions,
+  requestAvailablePackageMetadatas,
+  receiveAvailablePackageMetadatas,
   receiveSelectedAvailablePackageVersions,
   createErrorPackage,
   clearErrorPackage,
 ];
 
-export type PackagesAction = ActionType<typeof allActions[number]>;
+export type PackagesAction = ActionType<(typeof allActions)[number]>;
 
 export function fetchAvailablePackageSummaries(
   cluster: string,
@@ -107,9 +133,15 @@ export function fetchAvailablePackageSummaries(
   size: number,
   query?: string,
 ): ThunkAction<Promise<void>, IStoreState, null, PackagesAction> {
-  return async dispatch => {
-    dispatch(requestAvailablePackageSummaries(paginationToken));
+  return async (dispatch, getState) => {
+    const {
+      packages: { isFetching },
+    } = getState();
     try {
+      if (isFetching) {
+        throw Error("unexpected request, it was already fetching data");
+      }
+      dispatch(requestAvailablePackageSummaries(paginationToken));
       const response = await PackagesService.getAvailablePackageSummaries(
         cluster,
         namespace,
@@ -120,7 +152,7 @@ export function fetchAvailablePackageSummaries(
       );
       dispatch(receiveAvailablePackageSummaries({ response, paginationToken }));
     } catch (e: any) {
-      dispatch(createErrorPackage(new FetchError(e.message)));
+      dispatch(handleErrorAction(e, createErrorPackage(new FetchError(e.message))));
     }
   };
 }
@@ -134,7 +166,7 @@ export function fetchAvailablePackageVersions(
       const response = await PackagesService.getAvailablePackageVersions(availablePackageReference);
       dispatch(receiveSelectedAvailablePackageVersions(response));
     } catch (e: any) {
-      dispatch(createErrorPackage(new FetchError(e.message)));
+      dispatch(handleErrorAction(e, createErrorPackage(new FetchError(e.message))));
     }
   };
 }
@@ -156,7 +188,25 @@ export function fetchAndSelectAvailablePackageDetail(
         dispatch(createErrorPackage(new FetchError("could not find package version")));
       }
     } catch (e: any) {
-      dispatch(createErrorPackage(new FetchError(e.message)));
+      dispatch(handleErrorAction(e, createErrorPackage(new FetchError(e.message))));
+    }
+  };
+}
+
+export function fetchAvailablePackageMetadatas(
+  availablePackageReference: AvailablePackageReference,
+  version: string,
+): ThunkAction<Promise<void>, IStoreState, null, PackagesAction> {
+  return async dispatch => {
+    try {
+      dispatch(requestAvailablePackageMetadatas());
+      const response = await PackagesService.getAvailablePackageMetadatas(
+        availablePackageReference,
+        version,
+      );
+      dispatch(receiveAvailablePackageMetadatas(response));
+    } catch (e: any) {
+      dispatch(handleErrorAction(e, createErrorPackage(new FetchError(e.message))));
     }
   };
 }

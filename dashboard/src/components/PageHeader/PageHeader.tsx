@@ -1,12 +1,12 @@
-// Copyright 2018-2022 the Kubeapps contributors.
+// Copyright 2018-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import Icon from "components/Icon/Icon";
-import Column from "components/js/Column";
-import Row from "components/js/Row";
+import Column from "components/Column";
+import Row from "components/Row";
 import { getPluginIcon, getPluginPackageName } from "shared/utils";
 import "./PageHeader.css";
-import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins";
+import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins_pb";
 
 export interface IPageHeaderProps {
   title: string;

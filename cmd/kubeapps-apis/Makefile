@@ -1,4 +1,4 @@
-# Copyright 2021-2022 the Kubeapps contributors.
+# Copyright 2021-2023 the Kubeapps contributors.
 # SPDX-License-Identifier: Apache-2.0
 
 # Build the helm and kapp package plugins with the output in the devel directory.
@@ -18,7 +18,8 @@ cli-dependencies:
 		google.golang.org/grpc/cmd/protoc-gen-go-grpc \
 		google.golang.org/protobuf/cmd/protoc-gen-go \
 		github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-openapiv2 \
-		github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-grpc-gateway
+		github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-grpc-gateway \
+		github.com/bufbuild/connect-go/cmd/protoc-gen-connect-go
 
 # Not sure if it's worth having targets for buf, but at least the targets can
 # be tooling agnostic.

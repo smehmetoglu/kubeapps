@@ -1,4 +1,4 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2024 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 package main
@@ -6,25 +6,26 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/kubernetes/pkg/credentialprovider"
 	"sort"
 	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	k8scorev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 
+	vendirversions "carvel.dev/vendir/pkg/vendir/versions/v1alpha1"
 	"github.com/Masterminds/semver/v3"
-	kappcmdcore "github.com/k14s/kapp/pkg/kapp/cmd/core"
 	kappctrlv1alpha1 "github.com/vmware-tanzu/carvel-kapp-controller/pkg/apis/kappctrl/v1alpha1"
 	packagingv1alpha1 "github.com/vmware-tanzu/carvel-kapp-controller/pkg/apis/packaging/v1alpha1"
 	datapackagingv1alpha1 "github.com/vmware-tanzu/carvel-kapp-controller/pkg/apiserver/apis/datapackaging/v1alpha1"
-	vendirversions "github.com/vmware-tanzu/carvel-vendir/pkg/vendir/versions/v1alpha1"
+	kappcmdcore "github.com/vmware-tanzu/carvel-kapp/pkg/kapp/cmd/core"
 	corev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/packages/v1alpha1"
 	kappcorev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/plugins/kapp_controller/packages/v1alpha1"
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/pkgutils"
+	"github.com/vmware-tanzu/kubeapps/pkg/kube"
 )
 
 const REPO_REF_ANNOTATION = "packaging.carvel.dev/package-repository-ref"
@@ -140,20 +141,24 @@ func buildReadme(pkgMetadata *datapackagingv1alpha1.PackageMetadata, foundPkgSem
 
 // buildPackageIdentifier generates the package identifier (repoName/pkgName) for a given package
 func buildPackageIdentifier(pkgMetadata *datapackagingv1alpha1.PackageMetadata) string {
-	// default repo name if using kapp controller < v0.36.1
-	repoName := DEFAULT_REPO_NAME
+	repoName := getRepoNameFromAnnotation(pkgMetadata.Annotations[REPO_REF_ANNOTATION])
+	return fmt.Sprintf("%s/%s", repoName, pkgMetadata.Name)
+}
 
+// getRepoNameFromAnnotation gets the repo name from a string with the format "namespace/repoName",
+// for instance "default/tce-repo", and returns just the "repoName" part, e.g., "tce-repo"
+func getRepoNameFromAnnotation(repoRefAnnotation string) string {
+	// falling back to a "default" repo name if using kapp controller < v0.36.1
 	// See https://github.com/vmware-tanzu/carvel-kapp-controller/pull/532
-	if repoRefAnnotation := pkgMetadata.Annotations[REPO_REF_ANNOTATION]; repoRefAnnotation != "" {
-		// this annotation returns "namespace/reponame", for instance "default/tce-repo",
-		// but we just want the "reponame" part
+	repoName := DEFAULT_REPO_NAME
+	if repoRefAnnotation != "" {
 		splitRepoRefAnnotation := strings.Split(repoRefAnnotation, "/")
 		// just change the repo name if we have a valid annotation
 		if len(splitRepoRefAnnotation) == 2 {
 			repoName = strings.Split(repoRefAnnotation, "/")[1]
 		}
 	}
-	return fmt.Sprintf("%s/%s", repoName, pkgMetadata.Name)
+	return repoName
 }
 
 // buildPostInstallationNotes generates the installation notes based on the application status
@@ -210,6 +215,7 @@ type (
 					DefaultUpgradePolicy               string   `json:"defaultUpgradePolicy"`
 					DefaultPrereleasesVersionSelection []string `json:"defaultPrereleasesVersionSelection"`
 					DefaultAllowDowngrades             bool     `json:"defaultAllowDowngrades"`
+					GlobalPackagingNamespace           string   `json:"globalPackagingNamespace"`
 				} `json:"v1alpha1"`
 			} `json:"packages"`
 		} `json:"kappController"`
@@ -220,6 +226,7 @@ type (
 		defaultUpgradePolicy               pkgutils.UpgradePolicy
 		defaultPrereleasesVersionSelection []string
 		defaultAllowDowngrades             bool
+		globalPackagingNamespace           string
 	}
 )
 
@@ -229,6 +236,7 @@ var defaultPluginConfig = &kappControllerPluginParsedConfig{
 	defaultUpgradePolicy:               fallbackDefaultUpgradePolicy,
 	defaultPrereleasesVersionSelection: fallbackDefaultPrereleasesVersionSelection(),
 	defaultAllowDowngrades:             fallbackDefaultAllowDowngrades,
+	globalPackagingNamespace:           fallbackGlobalPackagingNamespace,
 }
 
 // prereleasesVersionSelection returns the proper value to the prereleases used in kappctrl from the selection
@@ -248,9 +256,7 @@ func prereleasesVersionSelection(prereleasesVersionSelection []string) *vendirve
 	} else {
 		// `prereleases: {Identifiers: []string{"foo"}}`: allow only prerelease with "foo" as part of the name if the version constraint allows it
 		prereleases := &vendirversions.VersionSelectionSemverPrereleases{Identifiers: []string{}}
-		for _, prereleaseVersionSelectionId := range prereleasesVersionSelection {
-			prereleases.Identifiers = append(prereleases.Identifiers, prereleaseVersionSelectionId)
-		}
+		prereleases.Identifiers = append(prereleases.Identifiers, prereleasesVersionSelection...)
 		return prereleases
 	}
 }
@@ -279,22 +285,24 @@ func (f *ConfigurableConfigFactoryImpl) RESTConfig() (*rest.Config, error) {
 // FilterMetadatas returns a slice where the content has been filtered
 // according to the provided filter options.
 func FilterMetadatas(metadatas []*datapackagingv1alpha1.PackageMetadata, filterOptions *corev1.FilterOptions) []*datapackagingv1alpha1.PackageMetadata {
-	// Currently we support filtering by query or category but not by repository
-	// (UX doesn't yet display carvel repo in filter options).
-	// Once the UX does, we should be able to filter by repository
-	// also as its now an annotation:
-	// https://github.com/vmware-tanzu/carvel-kapp-controller/pull/532
-	if filterOptions.Query == "" && len(filterOptions.Categories) == 0 {
-		return metadatas
-	}
-	filteredMeta := []*datapackagingv1alpha1.PackageMetadata{}
-	for _, metadata := range metadatas {
-		if (filterOptions.Query != "" && testMetadataMatchesQuery(metadata, filterOptions.Query)) ||
-			(len(filterOptions.Categories) > 0 && testMetadataMatchesCategories(metadata, filterOptions.Categories)) {
-			filteredMeta = append(filteredMeta, metadata)
+	filteredMetadatas := metadatas
+	if filterOptions != nil {
+		filteredMetadatas = []*datapackagingv1alpha1.PackageMetadata{}
+
+		skipQueryFilter := filterOptions.Query == ""
+		skipCategoriesFilter := len(filterOptions.Categories) == 0
+		skipRepositoriesFilter := len(filterOptions.Repositories) == 0
+
+		for _, metadata := range metadatas {
+			matchesQuery := skipQueryFilter || testMetadataMatchesQuery(metadata, filterOptions.Query)
+			matchesCategories := skipCategoriesFilter || testMetadataMatchesCategories(metadata, filterOptions.Categories)
+			matchesRepos := skipRepositoriesFilter || testMetadataMatchesRepos(metadata, filterOptions.Repositories)
+			if matchesRepos && matchesQuery && matchesCategories {
+				filteredMetadatas = append(filteredMetadatas, metadata)
+			}
 		}
 	}
-	return filteredMeta
+	return filteredMetadatas
 }
 
 func testMetadataMatchesQuery(metadata *datapackagingv1alpha1.PackageMetadata, query string) bool {
@@ -317,6 +325,18 @@ func testMetadataMatchesCategories(metadata *datapackagingv1alpha1.PackageMetada
 	}
 
 	return intersection
+}
+
+// testMetadataMatchesRepos returns true if the metadata matches the provided repositories.
+func testMetadataMatchesRepos(metadata *datapackagingv1alpha1.PackageMetadata, repositories []string) bool {
+	metadataRepoName := getRepoNameFromAnnotation(metadata.Annotations[REPO_REF_ANNOTATION])
+	// if the package is from one of the given repositories, it matches
+	for _, repo := range repositories {
+		if metadataRepoName == repo {
+			return true
+		}
+	}
+	return false
 }
 
 //
@@ -491,7 +511,7 @@ func isPluginManaged(pkgRepository *packagingv1alpha1.PackageRepository, pkgSecr
 	if !metav1.IsControlledBy(pkgSecret, pkgRepository) {
 		return false
 	}
-	if managedby := pkgSecret.GetAnnotations()[Annotation_ManagedBy_Key]; managedby != Annotation_ManagedBy_Value {
+	if managedby := pkgSecret.GetAnnotations()[annotationManagedByKey]; managedby != annotationManagedByValue {
 		return false
 	}
 	return true
@@ -502,7 +522,7 @@ func isBasicAuth(secret *k8scorev1.Secret) bool {
 }
 
 func isBearerAuth(secret *k8scorev1.Secret) bool {
-	return secret.Data != nil && secret.Data[BearerAuthToken] != nil
+	return secret.Data != nil && secret.Data[bearerAuthToken] != nil
 }
 
 func isSshAuth(secret *k8scorev1.Secret) bool {
@@ -514,8 +534,8 @@ func isDockerAuth(secret *k8scorev1.Secret) bool {
 }
 
 func toDockerConfig(docker *corev1.DockerCredentials) ([]byte, error) {
-	dockerConfig := &credentialprovider.DockerConfigJSON{
-		Auths: map[string]credentialprovider.DockerConfigEntry{
+	dockerConfig := &kube.DockerConfigJSON{
+		Auths: map[string]kube.DockerConfigEntry{
 			docker.Server: {
 				Username: docker.Username,
 				Password: docker.Password,
@@ -531,7 +551,7 @@ func toDockerConfig(docker *corev1.DockerCredentials) ([]byte, error) {
 }
 
 func fromDockerConfig(dockerjson []byte) (*corev1.DockerCredentials, error) {
-	dockerConfig := &credentialprovider.DockerConfigJSON{}
+	dockerConfig := &kube.DockerConfigJSON{}
 	if err := json.Unmarshal(dockerjson, dockerConfig); err != nil {
 		return nil, err
 	}

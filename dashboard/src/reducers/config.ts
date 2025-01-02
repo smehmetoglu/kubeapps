@@ -14,18 +14,21 @@ export const initialState: IConfigState = {
   loaded: false,
   kubeappsCluster: "",
   kubeappsNamespace: "",
-  globalReposNamespace: "",
+  helmGlobalNamespace: "",
+  carvelGlobalNamespace: "",
   appVersion: "",
   authProxyEnabled: false,
   oauthLoginURI: "",
   oauthLogoutURI: "",
   authProxySkipLoginPage: false,
   clusters: [],
-  featureFlags: { operators: false },
+  featureFlags: { operators: false, schemaEditor: { enabled: false } },
   theme: SupportedThemes.light,
   remoteComponentsUrl: "",
   customAppViews: [],
   skipAvailablePackageDetails: false,
+  createNamespaceLabels: {},
+  configuredPlugins: [],
 };
 
 const configReducer = (state: IConfigState = initialState, action: ConfigAction): IConfigState => {

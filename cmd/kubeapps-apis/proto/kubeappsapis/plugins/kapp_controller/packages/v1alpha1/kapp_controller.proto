@@ -1,4 +1,4 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 syntax = "proto3";
@@ -110,6 +110,12 @@ service KappControllerRepositoriesService {
   rpc DeletePackageRepository(kubeappsapis.core.packages.v1alpha1.DeletePackageRepositoryRequest) returns (kubeappsapis.core.packages.v1alpha1.DeletePackageRepositoryResponse) {
     option (google.api.http) = {
       delete: "/plugins/kapp_controller/packages/v1alpha1/repositories/c/{package_repo_ref.context.cluster}/ns/{package_repo_ref.context.namespace}/{package_repo_ref.identifier=**}"
+    };
+  }
+
+  rpc GetPackageRepositoryPermissions(kubeappsapis.core.packages.v1alpha1.GetPackageRepositoryPermissionsRequest) returns (kubeappsapis.core.packages.v1alpha1.GetPackageRepositoryPermissionsResponse) {
+    option (google.api.http) = {
+      get: "/plugins/kapp_controller/packages/v1alpha1/repositories/c/{context.cluster}/permissions"
     };
   }
 }

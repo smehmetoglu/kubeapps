@@ -12,6 +12,7 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/vmware-tanzu/kubeapps/pkg/chart/models"
 	"github.com/vmware-tanzu/kubeapps/pkg/dbutils"
+	log "k8s.io/klog/v2"
 )
 
 const AllNamespaces = "_all"
@@ -26,8 +27,8 @@ type PostgresAssetManager struct {
 	dbutils.PostgresAssetManagerIface
 }
 
-func NewPGManager(config dbutils.Config, globalReposNamespace string) (AssetManager, error) {
-	m, err := dbutils.NewPGManager(config, globalReposNamespace)
+func NewPGManager(config dbutils.Config, globalPackagingNamespace string) (AssetManager, error) {
+	m, err := dbutils.NewPGManager(config, globalPackagingNamespace)
 	if err != nil {
 		return nil, err
 	}
@@ -35,7 +36,10 @@ func NewPGManager(config dbutils.Config, globalReposNamespace string) (AssetMana
 }
 
 func (m *PostgresAssetManager) GetAllChartCategories(cq ChartQuery) ([]*models.ChartCategory, error) {
-	whereQuery, whereQueryParams := m.GenerateWhereClause(cq)
+	whereQuery, whereQueryParams, err := m.GenerateWhereClause(cq)
+	if err != nil {
+		return nil, err
+	}
 	dbQuery := fmt.Sprintf("SELECT (info ->> 'category') AS name, COUNT( (info ->> 'category')) AS count FROM %s %s GROUP BY (info ->> 'category') ORDER BY (info ->> 'category') ASC", dbutils.ChartTable, whereQuery)
 
 	chartsCategories, err := m.QueryAllChartCategories(dbQuery, whereQueryParams...)
@@ -72,13 +76,13 @@ func (m *PostgresAssetManager) GetChartWithFallback(namespace, chartID string, w
 
 	err := m.QueryOne(&chart, fmt.Sprintf("SELECT info FROM %s WHERE repo_namespace = $1 AND chart_id = $2", dbutils.ChartTable), namespace, chartID)
 	if err != nil {
-		splittedID := strings.Split(chartID, "/")
-		if withFallback == true && len(splittedID) == 2 {
+		splitID := strings.Split(chartID, "/")
+		if withFallback && len(splitID) == 2 {
 			// fallback query when a chart_id is not being retrieved
 			// it may occur when upgrading a mirrored chart (eg, jfrog/bitnami/wordpress)
 			// and helms only gives 'jfrog/wordpress' but we want to retrieve 'jfrog/bitnami/wordpress'
 			// this query search 'jfrog <whatever> wordpress'. If multiple results are found, returns just the first one
-			alikeChartID := splittedID[0] + "%" + splittedID[1]
+			alikeChartID := splitID[0] + "%" + splitID[1]
 			err := m.QueryOne(&chart, fmt.Sprintf("SELECT info FROM %s WHERE repo_namespace = $1 AND chart_id ILIKE $2", dbutils.ChartTable), namespace, alikeChartID)
 			if err != nil {
 				return models.Chart{}, err
@@ -119,13 +123,13 @@ func (m *PostgresAssetManager) GetChartVersionWithFallback(namespace, chartID, v
 	var chart models.Chart
 	err := m.QueryOne(&chart, fmt.Sprintf("SELECT info FROM %s WHERE repo_namespace = $1 AND chart_id = $2", dbutils.ChartTable), namespace, chartID)
 	if err != nil {
-		splittedID := strings.Split(chartID, "/")
-		if withFallback == true && len(splittedID) == 2 {
+		splitID := strings.Split(chartID, "/")
+		if withFallback && len(splitID) == 2 {
 			// fallback query when a chart_id is not being retrieved
 			// it may occur when upgrading a mirrored chart (eg, jfrog/bitnami/wordpress)
 			// and helms only gives 'jfrog/wordpress' but we want to retrieve 'jfrog/bitnami/wordpress'
 			// this query search 'jfrog <whatever> wordpress'. If multiple results are found, returns just the first one
-			alikeChartID := splittedID[0] + "%" + splittedID[1]
+			alikeChartID := splitID[0] + "%" + splitID[1]
 			err := m.QueryOne(&chart, fmt.Sprintf("SELECT info FROM %s WHERE repo_namespace = $1 AND chart_id ILIKE $2", dbutils.ChartTable), namespace, alikeChartID)
 			if err != nil {
 				return models.Chart{}, err
@@ -154,15 +158,17 @@ func (m *PostgresAssetManager) GetChartFiles(namespace, filesID string) (models.
 
 func (m *PostgresAssetManager) GetChartFilesWithFallback(namespace, filesID string, withFallback bool) (models.ChartFiles, error) {
 	var chartFiles models.ChartFiles
+	query := fmt.Sprintf("SELECT info FROM %s WHERE repo_namespace = $1 AND chart_files_id = $2", dbutils.ChartFilesTable)
 	err := m.QueryOne(&chartFiles, fmt.Sprintf("SELECT info FROM %s WHERE repo_namespace = $1 AND chart_files_id = $2", dbutils.ChartFilesTable), namespace, filesID)
 	if err != nil {
-		splittedID := strings.Split(filesID, "/")
-		if withFallback == true && len(splittedID) == 2 {
+		log.Errorf("query %q (%q, %q) failed with %v", query, namespace, filesID, err)
+		splitID := strings.Split(filesID, "/")
+		if withFallback && len(splitID) == 2 {
 			// fallback query when a chart_files_id is not being retrieved
 			// it may occur when upgrading a mirrored chart (eg, jfrog/bitnami/wordpress)
 			// and helms only gives 'jfrog/wordpress' but we want to retrieve 'jfrog/bitnami/wordpress'
 			// this query search 'jfrog <whatever> wordpress'. If multiple results are found, returns just the first one
-			alikeFilesID := splittedID[0] + "%" + splittedID[1]
+			alikeFilesID := splitID[0] + "%" + splitID[1]
 			err := m.QueryOne(&chartFiles, fmt.Sprintf("SELECT info FROM %s WHERE repo_namespace = $1 AND chart_files_id ILIKE $2", dbutils.ChartFilesTable), namespace, alikeFilesID)
 			if err != nil {
 				return models.ChartFiles{}, err
@@ -175,7 +181,10 @@ func (m *PostgresAssetManager) GetChartFilesWithFallback(namespace, filesID stri
 }
 
 func (m *PostgresAssetManager) GetPaginatedChartListWithFilters(cq ChartQuery, startItemNumber, pageSize int) ([]*models.Chart, error) {
-	whereQuery, whereQueryParams := m.GenerateWhereClause(cq)
+	whereQuery, whereQueryParams, err := m.GenerateWhereClause(cq)
+	if err != nil {
+		return nil, err
+	}
 	charts, err := m.GetPaginatedChartList(whereQuery, whereQueryParams, startItemNumber, pageSize)
 	if err != nil {
 		return nil, err
@@ -183,13 +192,13 @@ func (m *PostgresAssetManager) GetPaginatedChartListWithFilters(cq ChartQuery, s
 	return charts, nil
 }
 
-func (m *PostgresAssetManager) GenerateWhereClause(cq ChartQuery) (string, []interface{}) {
+func (m *PostgresAssetManager) GenerateWhereClause(cq ChartQuery) (string, []interface{}, error) {
 	whereClauses := []string{}
 	whereQueryParams := []interface{}{}
 	whereQuery := ""
 
 	if cq.Namespace != AllNamespaces {
-		whereQueryParams = append(whereQueryParams, cq.Namespace, m.GetGlobalReposNamespace())
+		whereQueryParams = append(whereQueryParams, cq.Namespace, m.GetGlobalPackagingNamespace())
 		whereClauses = append(whereClauses, fmt.Sprintf(
 			"(repo_namespace = $%d OR repo_namespace = $%d)", len(whereQueryParams)-1, len(whereQueryParams),
 		))
@@ -201,12 +210,18 @@ func (m *PostgresAssetManager) GenerateWhereClause(cq ChartQuery) (string, []int
 		))
 	}
 	if cq.Version != "" && cq.AppVersion != "" {
+		if !containsOnlyAllowedChars(cq.Version) {
+			return "", nil, errors.New("invalid version")
+		}
+		if !containsOnlyAllowedChars(cq.AppVersion) {
+			return "", nil, errors.New("invalid app version")
+		}
 		parametrizedJsonbLiteral := fmt.Sprintf(`[{"version":"%s","app_version":"%s"}]`, cq.Version, cq.AppVersion)
 		whereQueryParams = append(whereQueryParams, parametrizedJsonbLiteral)
 		whereClauses = append(whereClauses, fmt.Sprintf("(info->'chartVersions' @> $%d::jsonb)", len(whereQueryParams)))
 	}
 
-	if cq.Repos != nil && len(cq.Repos) > 0 {
+	if len(cq.Repos) > 0 {
 		repoClauses := []string{}
 		for _, repo := range cq.Repos {
 			if repo != "" {
@@ -219,7 +234,7 @@ func (m *PostgresAssetManager) GenerateWhereClause(cq ChartQuery) (string, []int
 			whereClauses = append(whereClauses, repoQuery)
 		}
 	}
-	if cq.Categories != nil && len(cq.Categories) > 0 {
+	if len(cq.Categories) > 0 {
 		categoryClauses := []string{}
 		for _, category := range cq.Categories {
 			if category != "" {
@@ -246,5 +261,16 @@ func (m *PostgresAssetManager) GenerateWhereClause(cq ChartQuery) (string, []int
 		whereQuery = "WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
-	return whereQuery, whereQueryParams
+	return whereQuery, whereQueryParams, nil
+}
+
+// See https://semver.org/#backusnaur-form-grammar-for-valid-semver-versions
+const allowed string = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+-."
+
+// Using the same "semver" validation logic for parsing version
+// see https://github.com/Masterminds/semver/blob/v3.1.1/version.go
+func containsOnlyAllowedChars(s string) bool {
+	return strings.IndexFunc(s, func(r rune) bool {
+		return !strings.ContainsRune(allowed, r)
+	}) == -1
 }

@@ -1,4 +1,4 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 syntax = "proto3";
@@ -48,6 +48,12 @@ service RepositoriesService {
       delete: "/core/packages/v1alpha1/repositories/plugin/{package_repo_ref.plugin.name}/{package_repo_ref.plugin.version}/c/{package_repo_ref.context.cluster}/ns/{package_repo_ref.context.namespace}/{package_repo_ref.identifier=**}"
     };
   }
+
+  rpc GetPackageRepositoryPermissions(GetPackageRepositoryPermissionsRequest) returns (GetPackageRepositoryPermissionsResponse) {
+    option (google.api.http) = {
+      get: "/core/packages/v1alpha1/repositories/c/{context.cluster}/permissions"
+    };
+  }
 }
 
 // Standard request and response messages for each required function are defined
@@ -85,6 +91,9 @@ message AddPackageRepositoryRequest {
   string url = 6;
 
   // The interval at which to check the upstream for updates (in time+unit)
+  // Some plugins may, additionally, support other formats, for instance,
+  // a cron expression.
+  // e.g., "*/10 * * * *" will be equivalent to "10m"
   // Optional. Defaults to 10m if not specified
   string interval = 7;
 
@@ -300,6 +309,9 @@ message UpdatePackageRepositoryRequest {
   string description = 3;
 
   // The interval at which to check the upstream for updates (in time+unit)
+  // Some plugins may, additionally, support other formats, for instance,
+  // a cron expression.
+  // e.g., "*/10 * * * *" will be equivalent to "10m"
   // Optional. Defaults to 10m if not specified
   string interval = 4;
 
@@ -417,6 +429,9 @@ message PackageRepositoryDetail {
   string url = 6;
 
   // The interval at which to check the upstream for updates (in time+unit)
+  // Some plugins may, additionally, support other formats, for instance,
+  // a cron expression.
+  // e.g., "*/10 * * * *" will be equivalent to "10m"
   string interval = 7;
 
   // TLS-specific parameters for connecting to a repository.
@@ -498,4 +513,21 @@ message UpdatePackageRepositoryResponse {
 // Response for DeletePackageRepository
 message DeletePackageRepositoryResponse {
   // For future extensibility only.
+ }
+
+ message GetPackageRepositoryPermissionsRequest {
+   // The context (cluster/namespace) for the request
+   Context context = 1;
+ }
+
+ message PackageRepositoriesPermissions {
+   kubeappsapis.core.plugins.v1alpha1.Plugin plugin = 1;
+   // Permissions at the global namespace (if any)
+   map<string, bool> global = 2;
+   // Permissions for the namespace
+   map<string, bool> namespace = 3;
+ }
+
+ message GetPackageRepositoryPermissionsResponse {
+   repeated PackageRepositoriesPermissions permissions = 1;
  }

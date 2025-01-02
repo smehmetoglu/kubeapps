@@ -1,4 +1,4 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 package main
@@ -7,13 +7,12 @@ import (
 	"context"
 	"testing"
 
+	"github.com/bufbuild/connect-go"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/vmware-tanzu/kubeapps/cmd/apprepository-controller/pkg/apis/apprepository/v1alpha1"
 	corev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/packages/v1alpha1"
 	plugins "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/plugins/v1alpha1"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/release"
@@ -26,7 +25,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 		releaseStub        releaseStub
 		request            *corev1.CreateInstalledPackageRequest
 		expectedResponse   *corev1.CreateInstalledPackageResponse
-		expectedStatusCode codes.Code
+		expectedStatusCode connect.Code
 		expectedRelease    *release.Release
 	}{
 		{
@@ -62,7 +61,6 @@ func TestCreateInstalledPackage(t *testing.T) {
 					Plugin:     GetPluginDetail(),
 				},
 			},
-			expectedStatusCode: codes.OK,
 			expectedRelease: &release.Release{
 				Name: "my-apache",
 				Info: &release.Info{
@@ -91,7 +89,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 					Identifier: "not-a-valid-identifier",
 				},
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedStatusCode: connect.CodeInvalidArgument,
 		},
 	}
 
@@ -116,14 +114,18 @@ func TestCreateInstalledPackage(t *testing.T) {
 			defer cleanup()
 			populateAssetDB(t, mockDB, []releaseStub{tc.releaseStub})
 
-			response, err := server.CreateInstalledPackage(context.Background(), tc.request)
+			response, err := server.CreateInstalledPackage(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.expectedStatusCode; err != nil && got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 			}
 
+			if tc.expectedStatusCode != 0 {
+				return
+			}
+
 			// Verify the expected response (our contract to the caller).
-			if got, want := response, tc.expectedResponse; !cmp.Equal(got, want, ignoredUnexported) {
+			if got, want := response.Msg, tc.expectedResponse; !cmp.Equal(got, want, ignoredUnexported) {
 				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoredUnexported))
 			}
 
@@ -210,7 +212,7 @@ func TestTimeoutCreateInstalledPackage(t *testing.T) {
 			}
 			populateAssetDB(t, mockDB, []releaseStub{rStub})
 
-			_, err := server.CreateInstalledPackage(context.Background(), request)
+			_, err := server.CreateInstalledPackage(context.Background(), connect.NewRequest(request))
 
 			if got, want := effectiveTimeout, tc.timeoutSeconds; got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)

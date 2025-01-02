@@ -1,4 +1,4 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 package main
@@ -7,20 +7,19 @@ import (
 	"context"
 	"testing"
 
+	"github.com/bufbuild/connect-go"
 	"github.com/vmware-tanzu/kubeapps/cmd/apprepository-controller/pkg/apis/apprepository/v1alpha1"
 	corev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/packages/v1alpha1"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"helm.sh/helm/v3/pkg/release"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestDeleteInstalledPackage(t *testing.T) {
 	testCases := []struct {
-		name               string
-		existingReleases   []releaseStub
-		request            *corev1.DeleteInstalledPackageRequest
-		expectedStatusCode codes.Code
+		name              string
+		existingReleases  []releaseStub
+		request           *corev1.DeleteInstalledPackageRequest
+		expectedErrorCode connect.Code
 	}{
 		{
 			name: "deletes the installed package",
@@ -43,7 +42,6 @@ func TestDeleteInstalledPackage(t *testing.T) {
 					Identifier: "my-apache",
 				},
 			},
-			expectedStatusCode: codes.OK,
 		},
 		{
 			name: "returns invalid if installed package doesn't exist",
@@ -55,7 +53,7 @@ func TestDeleteInstalledPackage(t *testing.T) {
 					Identifier: "not-a-valid-identifier",
 				},
 			},
-			expectedStatusCode: codes.NotFound,
+			expectedErrorCode: connect.CodeNotFound,
 		},
 	}
 
@@ -71,9 +69,12 @@ func TestDeleteInstalledPackage(t *testing.T) {
 			})
 			defer cleanup()
 
-			_, err := server.DeleteInstalledPackage(context.Background(), tc.request)
+			_, err := server.DeleteInstalledPackage(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if err == nil && tc.expectedErrorCode == 0 {
+				return
+			}
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 			}
 

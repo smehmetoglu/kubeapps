@@ -2,7 +2,7 @@
 
 The [Pinniped project](https://pinniped.dev/) exists to "Simplify user authentication for any Kubernetes cluster" and enables OIDC providers to be configured dynamically, rather than when a cluster is created. Kubeapps can be configured so that users must authenticate with the same OIDC provider and then authenticated requests from Kubeapps to the API server will be proxied via Pinniped, with the signed OIDC `id_token` being verified by Pinniped and exchanged for a client certificate accepted trusted by the API server.
 
-## Installing Pinniped
+## Installing Pinniped Concierge
 
 Install Pinniped on your cluster with:
 
@@ -12,7 +12,7 @@ kubectl apply -f https://github.com/vmware-tanzu/pinniped/releases/download/v0.1
 kubectl apply -f  https://github.com/vmware-tanzu/pinniped/releases/download/v0.18.0/install-pinniped-concierge.yaml
 ```
 
-## Configure Pinniped to trust your OIDC identity provider
+## Configure Pinniped Concierge to trust your OIDC identity provider
 
 Once Pinniped is running, you can add a `JWTAuthenticator` custom resource so that Pinniped knows to trust your OIDC identity provider.
 
@@ -88,7 +88,7 @@ But, what if this `kube-controller-manager` is not a normal pod on a schedulable
 
 In managed clusters, such as AKS, Pinniped cannot read the cluster's certificate and key. In this case, Pinniped will have a fallback mechanism: the [impersonation proxy](https://pinniped.dev/docs/background/architecture/). It simply creates a LoadBalancer service that proxies the actual Kubernetes API. For this reason, when using Kubeapps in managed clusters using Pinniped, you'll need to use the Impersonation Proxy URL (and CA certificate) instead of the usual k8s API server URL.
 
-Assuming you have successfully [installed Pinniped](#installing-pinniped) and configured the [JWTAuthenticator](#configure-pinniped-to-trust-your-oidc-identity-provider), you have to retrieve the Impersonation Proxy URL and CA by inspecting the `CredentialIssuer` object. To do so, you can run the following commands:
+Assuming you have successfully [installed Pinniped](#installing-pinniped-concierge) and configured the [JWTAuthenticator](#configure-pinniped-concierge-to-trust-your-oidc-identity-provider), you have to retrieve the Impersonation Proxy URL and CA by inspecting the `CredentialIssuer` object. To do so, you can run the following commands:
 
 Retrieving the Impersonation Proxy URL:
 
@@ -144,8 +144,9 @@ and finally configure Kubeapps' `pinniped-proxy` service to use TLS and the back
 
 ```yaml
 pinnipedProxy:
-  tlsSecret: pinniped-proxy-tls
-  CACert: pinniped-proxy-ca
+  tls:
+    existingSecret: pinniped-proxy-tls
+    caCertificate: pinniped-proxy-ca
 ```
 
 Note that this does not eliminate internal clear-text communication of credentials within the cluster because currently the `oauth2-proxy` service communicates with the `kubeapps-apis` backend over http with the user `id_token` in the headers.

@@ -1,4 +1,4 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha1
@@ -7,19 +7,17 @@ import (
 	"context"
 	"testing"
 
+	"github.com/bufbuild/connect-go"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/packages/v1alpha1"
 	plugins "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/plugins/v1alpha1"
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugin_test"
-
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 var mockedRepoPlugin1 = makeDefaultTestRepositoriesPlugin("mock1")
 var mockedRepoPlugin2 = makeDefaultTestRepositoriesPlugin("mock2")
-var mockedNotFoundRepoPlugin = makeOnlyStatusTestRepositoriesPlugin("bad-plugin", codes.NotFound)
+var mockedNotFoundRepoPlugin = makeOnlyStatusTestRepositoriesPlugin("bad-plugin", connect.CodeNotFound)
 
 var ignoreUnexportedRepoOpts = cmpopts.IgnoreUnexported(
 	corev1.AddPackageRepositoryResponse{},
@@ -32,6 +30,8 @@ var ignoreUnexportedRepoOpts = cmpopts.IgnoreUnexported(
 	corev1.GetPackageRepositorySummariesResponse{},
 	corev1.PackageRepositorySummary{},
 	corev1.UpdatePackageRepositoryResponse{},
+	corev1.GetPackageRepositoryPermissionsResponse{},
+	corev1.PackageRepositoriesPermissions{},
 )
 
 func makeDefaultTestRepositoriesPlugin(pluginName string) repoPluginsWithServer {
@@ -52,11 +52,11 @@ func makeDefaultTestRepositoriesPlugin(pluginName string) repoPluginsWithServer 
 	}
 }
 
-func makeOnlyStatusTestRepositoriesPlugin(pluginName string, statusCode codes.Code) repoPluginsWithServer {
+func makeOnlyStatusTestRepositoriesPlugin(pluginName string, errorCode connect.Code) repoPluginsWithServer {
 	pluginDetails := &plugins.Plugin{Name: pluginName, Version: "v1alpha1"}
 	repositoriesPluginServer := &plugin_test.TestRepositoriesPluginServer{Plugin: pluginDetails}
 
-	repositoriesPluginServer.Status = statusCode
+	repositoriesPluginServer.ErrorCode = errorCode
 
 	return repoPluginsWithServer{
 		plugin: pluginDetails,
@@ -68,7 +68,7 @@ func TestAddPackageRepository(t *testing.T) {
 	testCases := []struct {
 		name              string
 		configuredPlugins []*plugins.Plugin
-		statusCode        codes.Code
+		errorCode         connect.Code
 		request           *corev1.AddPackageRepositoryRequest
 		expectedResponse  *corev1.AddPackageRepositoryResponse
 	}{
@@ -78,7 +78,6 @@ func TestAddPackageRepository(t *testing.T) {
 				{Name: "plugin-1", Version: "v1alpha1"},
 				{Name: "plugin-1", Version: "v1alpha2"},
 			},
-			statusCode: codes.OK,
 			request: &corev1.AddPackageRepositoryRequest{
 				Plugin: &plugins.Plugin{Name: "plugin-1", Version: "v1alpha1"},
 				Context: &corev1.Context{
@@ -99,8 +98,8 @@ func TestAddPackageRepository(t *testing.T) {
 			},
 		},
 		{
-			name:       "returns invalid argument if plugin not specified in request",
-			statusCode: codes.InvalidArgument,
+			name:      "returns invalid argument if plugin not specified in request",
+			errorCode: connect.CodeInvalidArgument,
 			request: &corev1.AddPackageRepositoryRequest{
 				Context: &corev1.Context{
 					Cluster:   "default",
@@ -110,8 +109,8 @@ func TestAddPackageRepository(t *testing.T) {
 			},
 		},
 		{
-			name:       "returns internal error if unable to find the plugin",
-			statusCode: codes.Internal,
+			name:      "returns internal error if unable to find the plugin",
+			errorCode: connect.CodeInternal,
 			request: &corev1.AddPackageRepositoryRequest{
 				Plugin: &plugins.Plugin{Name: "plugin-1", Version: "v1alpha1"},
 				Context: &corev1.Context{
@@ -137,14 +136,14 @@ func TestAddPackageRepository(t *testing.T) {
 				pluginsWithServers: configuredPluginServers,
 			}
 
-			addRepoResponse, err := server.AddPackageRepository(context.Background(), tc.request)
+			addRepoResponse, err := server.AddPackageRepository(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.statusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.errorCode; err != nil && got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 			}
 
-			if tc.statusCode == codes.OK {
-				if got, want := addRepoResponse, tc.expectedResponse; !cmp.Equal(got, want, ignoreUnexportedRepoOpts) {
+			if tc.errorCode == 0 {
+				if got, want := addRepoResponse.Msg, tc.expectedResponse; !cmp.Equal(got, want, ignoreUnexportedRepoOpts) {
 					t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexportedRepoOpts))
 				}
 			}
@@ -156,7 +155,7 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 	testCases := []struct {
 		name              string
 		configuredPlugins []repoPluginsWithServer
-		statusCode        codes.Code
+		errorCode         connect.Code
 		request           *corev1.GetPackageRepositoryDetailRequest
 		expectedResponse  *corev1.GetPackageRepositoryDetailResponse
 	}{
@@ -179,7 +178,6 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 			expectedResponse: &corev1.GetPackageRepositoryDetailResponse{
 				Detail: plugin_test.MakePackageRepositoryDetail("repo-1", mockedRepoPlugin1.plugin),
 			},
-			statusCode: codes.OK,
 		},
 		{
 			name: "it should fail when calling the core GetPackageRepositoryDetail operation when the package is not present in a plugin",
@@ -197,7 +195,7 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 					Plugin:     mockedNotFoundPackagingPlugin.plugin,
 				},
 			},
-			statusCode: codes.NotFound,
+			errorCode: connect.CodeNotFound,
 		},
 	}
 
@@ -207,14 +205,14 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				pluginsWithServers: tc.configuredPlugins,
 			}
 			packageRepoDetail, err := server.GetPackageRepositoryDetail(
-				context.Background(), tc.request)
+				context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.statusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.errorCode; err != nil && got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 			}
 
-			if tc.statusCode == codes.OK {
-				if got, want := packageRepoDetail, tc.expectedResponse; !cmp.Equal(got, want, ignoreUnexportedRepoOpts) {
+			if tc.errorCode == 0 {
+				if got, want := packageRepoDetail.Msg, tc.expectedResponse; !cmp.Equal(got, want, ignoreUnexportedRepoOpts) {
 					t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexportedRepoOpts))
 				}
 			}
@@ -226,7 +224,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 	testCases := []struct {
 		name              string
 		configuredPlugins []repoPluginsWithServer
-		statusCode        codes.Code
+		errorCode         connect.Code
 		request           *corev1.GetPackageRepositorySummariesRequest
 		expectedResponse  *corev1.GetPackageRepositorySummariesResponse
 	}{
@@ -250,7 +248,6 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 					plugin_test.MakePackageRepositorySummary("repo-2", mockedPackagingPlugin2.plugin),
 				},
 			},
-			statusCode: codes.OK,
 		},
 		{
 			name: "it should fail when calling the core GetPackageRepositorySummaries operation when the package is not present in a plugin",
@@ -264,7 +261,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 					Namespace: plugin_test.DefaultNamespace,
 				},
 			},
-			statusCode: codes.NotFound,
+			errorCode: connect.CodeNotFound,
 		},
 	}
 
@@ -273,14 +270,14 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 			server := &repositoriesServer{
 				pluginsWithServers: tc.configuredPlugins,
 			}
-			repoSummaries, err := server.GetPackageRepositorySummaries(context.Background(), tc.request)
+			repoSummaries, err := server.GetPackageRepositorySummaries(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.statusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.errorCode; err != nil && got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 			}
 
-			if tc.statusCode == codes.OK {
-				if got, want := repoSummaries, tc.expectedResponse; !cmp.Equal(got, want, ignoreUnexportedRepoOpts) {
+			if tc.errorCode == 0 {
+				if got, want := repoSummaries.Msg, tc.expectedResponse; !cmp.Equal(got, want, ignoreUnexportedRepoOpts) {
 					t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexportedRepoOpts))
 				}
 			}
@@ -293,7 +290,7 @@ func TestUpdatePackageRepository(t *testing.T) {
 	testCases := []struct {
 		name              string
 		configuredPlugins []*plugins.Plugin
-		statusCode        codes.Code
+		errorCode         connect.Code
 		request           *corev1.UpdatePackageRepositoryRequest
 		expectedResponse  *corev1.UpdatePackageRepositoryResponse
 	}{
@@ -303,7 +300,6 @@ func TestUpdatePackageRepository(t *testing.T) {
 				{Name: "plugin-1", Version: "v1alpha1"},
 				{Name: "plugin-1", Version: "v1alpha2"},
 			},
-			statusCode: codes.OK,
 			request: &corev1.UpdatePackageRepositoryRequest{
 				PackageRepoRef: &corev1.PackageRepositoryReference{
 					Context:    &corev1.Context{Cluster: "default", Namespace: "my-ns"},
@@ -320,8 +316,8 @@ func TestUpdatePackageRepository(t *testing.T) {
 			},
 		},
 		{
-			name:       "returns invalid argument if plugin not specified in request",
-			statusCode: codes.InvalidArgument,
+			name:      "returns invalid argument if plugin not specified in request",
+			errorCode: connect.CodeInvalidArgument,
 			request: &corev1.UpdatePackageRepositoryRequest{
 				PackageRepoRef: &corev1.PackageRepositoryReference{
 					Identifier: "repo-1",
@@ -329,8 +325,8 @@ func TestUpdatePackageRepository(t *testing.T) {
 			},
 		},
 		{
-			name:       "returns internal error if unable to find the plugin",
-			statusCode: codes.Internal,
+			name:      "returns internal error if unable to find the plugin",
+			errorCode: connect.CodeInternal,
 			request: &corev1.UpdatePackageRepositoryRequest{
 				PackageRepoRef: &corev1.PackageRepositoryReference{
 					Identifier: "repo-1",
@@ -354,14 +350,14 @@ func TestUpdatePackageRepository(t *testing.T) {
 				pluginsWithServers: configuredPluginServers,
 			}
 
-			updatedRepoResponse, err := server.UpdatePackageRepository(context.Background(), tc.request)
+			updatedRepoResponse, err := server.UpdatePackageRepository(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.statusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.errorCode; err != nil && got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 			}
 
-			if tc.statusCode == codes.OK {
-				if got, want := updatedRepoResponse, tc.expectedResponse; !cmp.Equal(got, want, ignoreUnexportedRepoOpts) {
+			if tc.errorCode == 0 {
+				if got, want := updatedRepoResponse.Msg, tc.expectedResponse; !cmp.Equal(got, want, ignoreUnexportedRepoOpts) {
 					t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexportedRepoOpts))
 				}
 			}
@@ -374,7 +370,7 @@ func TestDeletePackageRepository(t *testing.T) {
 	testCases := []struct {
 		name              string
 		configuredPlugins []*plugins.Plugin
-		statusCode        codes.Code
+		errorCode         connect.Code
 		request           *corev1.DeletePackageRepositoryRequest
 	}{
 		{
@@ -383,7 +379,6 @@ func TestDeletePackageRepository(t *testing.T) {
 				{Name: "plugin-1", Version: "v1alpha1"},
 				{Name: "plugin-1", Version: "v1alpha2"},
 			},
-			statusCode: codes.OK,
 			request: &corev1.DeletePackageRepositoryRequest{
 				PackageRepoRef: &corev1.PackageRepositoryReference{
 					Context:    &corev1.Context{Cluster: "default", Namespace: "my-ns"},
@@ -393,8 +388,8 @@ func TestDeletePackageRepository(t *testing.T) {
 			},
 		},
 		{
-			name:       "returns invalid argument if plugin not specified in request",
-			statusCode: codes.InvalidArgument,
+			name:      "returns invalid argument if plugin not specified in request",
+			errorCode: connect.CodeInvalidArgument,
 			request: &corev1.DeletePackageRepositoryRequest{
 				PackageRepoRef: &corev1.PackageRepositoryReference{
 					Identifier: "repo-1",
@@ -402,8 +397,8 @@ func TestDeletePackageRepository(t *testing.T) {
 			},
 		},
 		{
-			name:       "returns internal error if unable to find the plugin",
-			statusCode: codes.Internal,
+			name:      "returns internal error if unable to find the plugin",
+			errorCode: connect.CodeInternal,
 			request: &corev1.DeletePackageRepositoryRequest{
 				PackageRepoRef: &corev1.PackageRepositoryReference{
 					Identifier: "repo-1",
@@ -427,10 +422,85 @@ func TestDeletePackageRepository(t *testing.T) {
 				pluginsWithServers: configuredPluginServers,
 			}
 
-			_, err := server.DeletePackageRepository(context.Background(), tc.request)
+			_, err := server.DeletePackageRepository(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.statusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.errorCode; err != nil && got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
+			}
+		})
+	}
+}
+
+func TestGetPackageRepositoryPermissions(t *testing.T) {
+
+	testCases := []struct {
+		name              string
+		configuredPlugins []*plugins.Plugin
+		errorCode         connect.Code
+		request           *corev1.GetPackageRepositoryPermissionsRequest
+		expectedResponse  *corev1.GetPackageRepositoryPermissionsResponse
+	}{
+		{
+			name: "returns permissions for all plugins",
+			configuredPlugins: []*plugins.Plugin{
+				{Name: "plugin-1", Version: "v1alpha1"},
+				{Name: "plugin-1", Version: "v1alpha2"},
+			},
+			request: &corev1.GetPackageRepositoryPermissionsRequest{},
+			expectedResponse: &corev1.GetPackageRepositoryPermissionsResponse{
+				Permissions: []*corev1.PackageRepositoriesPermissions{
+					{
+						Plugin: &plugins.Plugin{Name: "plugin-1", Version: "v1alpha1"},
+						Namespace: map[string]bool{
+							"ns-verb": true,
+						},
+						Global: map[string]bool{
+							"global-verb": true,
+						},
+					},
+					{
+						Plugin: &plugins.Plugin{Name: "plugin-1", Version: "v1alpha2"},
+						Namespace: map[string]bool{
+							"ns-verb": true,
+						},
+						Global: map[string]bool{
+							"global-verb": true,
+						},
+					},
+				},
+			},
+		},
+		{
+			name:             "returns empty set when no plugins",
+			request:          &corev1.GetPackageRepositoryPermissionsRequest{},
+			expectedResponse: &corev1.GetPackageRepositoryPermissionsResponse{},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var configuredPluginServers []repoPluginsWithServer
+			for _, p := range tc.configuredPlugins {
+				configuredPluginServers = append(configuredPluginServers, repoPluginsWithServer{
+					plugin: p,
+					server: plugin_test.TestRepositoriesPluginServer{Plugin: p},
+				})
+			}
+
+			server := &repositoriesServer{
+				pluginsWithServers: configuredPluginServers,
+			}
+
+			updatedRepoResponse, err := server.GetPackageRepositoryPermissions(context.Background(), connect.NewRequest(tc.request))
+
+			if got, want := connect.CodeOf(err), tc.errorCode; err != nil && got != want {
+				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
+			}
+
+			if tc.errorCode == 0 {
+				if got, want := updatedRepoResponse.Msg, tc.expectedResponse; !cmp.Equal(got, want, ignoreUnexportedRepoOpts) {
+					t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexportedRepoOpts))
+				}
 			}
 		})
 	}

@@ -2,7 +2,7 @@
 
 Once the VMware Tanzu™ Kubernetes Grid™ cluster has been configured to work with Pinniped and the OIDC provider, the next step is to configure Kubeapps. This involves a number of tasks, including making Kubeapps proxy requests to Pinniped, enabling the OIDC login and, optionally, configuring the look and feel of the Kubeapps user interface.
 
-Kubeapps is currently officially delivered as a Helm chart packaged by Bitnami. This Helm Chart offers a large number of configuration options in its [`values.yaml`](https://github.com/bitnami/charts/blob/master/bitnami/kubeapps/values.yaml) file. A general overview of the key configuration parameters for a TKG cluster is shown below:
+Kubeapps is currently officially delivered as a Helm chart packaged by Bitnami. This Helm Chart offers a large number of configuration options in its [`values.yaml`](https://github.com/bitnami/charts/blob/main/bitnami/kubeapps/values.yaml) file. A general overview of the key configuration parameters for a TKG cluster is shown below:
 
 ```yaml
 ## Values likely to be modified
@@ -22,13 +22,13 @@ apprepository: # Apprepository controller configuration
   initialRepos: # Initial repositories to fetch
 ```
 
-> **TIP**: Refer to the [Bitnami Kubeapps Helm chart documentation](https://github.com/bitnami/charts/blob/master/bitnami/kubeapps/README.md) for more information.
+> **TIP**: Refer to the [Bitnami Kubeapps Helm chart documentation](https://github.com/bitnami/charts/blob/main/bitnami/kubeapps/README.md) for more information.
 
 The two main configuration areas are authentication and user interface.
 
 Key authentication parameters are:
 
-- `clusters` to define the list of clusters that Kubeapps can target and which of them will use Pinniped;
+- `clusters` to define the list of clusters that Kubeapps can target and which of them uses Pinniped;
 - `pinnipedProxy` to enable the _Pinniped Proxy_ component;
 - `authProxy`: to define the flags used by _OAuth2 Proxy_, the component for performing the actual OIDC login.
 
@@ -43,13 +43,13 @@ Key user interface parameters are:
 > - As values passed via command line:
 >
 > ```bash
-> helm install kubeapps --namespace kubeapps --set ingress.enabled=true bitnami/kubeapps
+> helm install kubeapps --namespace kubeapps --set ingress.enabled=true oci://registry-1.docker.io/bitnamicharts/kubeapps
 > ```
 >
 > - As values stored in a custom `values.yaml` file read in during chart deployment:
 >
 > ```bash
-> helm install kubeapps --namespace kubeapps -f custom-values.yaml  bitnami/kubeapps
+> helm install kubeapps --namespace kubeapps -f custom-values.yaml  oci://registry-1.docker.io/bitnamicharts/kubeapps
 > ```
 
 ### Step 2.1: Configure Authentication
@@ -77,7 +77,7 @@ The first step is to configure the `clusters`, `pinnipedProxy` and `authProxy` p
 
    > **TIP**: The `defaultAuthenticatorName` must match the _JWTAuthenticator_ resource name created in [Step 1](./step-1.md).
 
-   > **NOTE**: Just if you are using the Pinniped version provided by TMC (instead of the one already provided by TKG), you also need to point to its namespace and API group suffix as follows. You can read more about it in the [chart documentation](https://github.com/bitnami/charts/blob/master/bitnami/kubeapps/README.md#pinniped-proxy-parameters).
+   > **NOTE**: Just if you are using the Pinniped version provided by TMC (instead of the one already provided by TKG), you also need to point to its namespace and API group suffix as follows. You can read more about it in the [chart documentation](https://github.com/bitnami/charts/blob/main/bitnami/kubeapps/README.md#pinniped-proxy-parameters).
    >
    > ```yaml
    > pinnipedProxy:
@@ -96,7 +96,7 @@ The first step is to configure the `clusters`, `pinnipedProxy` and `authProxy` p
    - Replace the `OIDC-REDEEM-URL` with the token redeem URL of the OIDC provider. For CSP it is `https://console.cloud.vmware.com/csp/gateway/am/api/auth/token`.
    - Replace the `OIDC-JWKS-URL` with the JSON Web Key Set URL of the OIDC provider. For CSP it is `https://console.cloud.vmware.com/csp/gateway/am/api/auth/token-public-key?format=jwks`.
 
-> **TIP**: Remember that any OIDC-compliant provider should expose a `.well-known/openid-configuration` ([CSP example](https://console.cloud.vmware.com/csp/gateway/am/api/.well-known/openid-configuration)) where you will able to find the required endpoints in this step.
+> **TIP**: Remember that any OIDC-compliant provider should expose a `.well-known/openid-configuration` ([CSP example](https://console.cloud.vmware.com/csp/gateway/am/api/.well-known/openid-configuration)) where you can find the required endpoints in this step.
 
 ```yaml
 authProxy:
@@ -113,7 +113,7 @@ authProxy:
     - --oidc-jwks-url=OIDC-JWKS-URL # In CSP: https://console.cloud.vmware.com/csp/gateway/am/api/auth/token-public-key?format=jwks
 ```
 
-> **TIP**: In some providers whose issuer URL does match the token URL, the flag `--skip-oidc-discovery=true` can be removed. Instead, just setting the `--oidc-issuer-url` flag will perform the automatic discovery of the rest of the endpoints. Further information at the [official OAuth2Proxy documentation](https://oauth2-proxy.github.io/oauth2-proxy/docs/configuration/overview/).
+> **TIP**: In some providers whose issuer URL does match the token URL, the flag `--skip-oidc-discovery=true` can be removed. Instead, just setting the `--oidc-issuer-url` flag performs the automatic discovery of the rest of the endpoints. Further information at the [official OAuth2Proxy documentation](https://oauth2-proxy.github.io/oauth2-proxy/docs/configuration/overview/).
 
 At this point, Kubeapps is configured to use Pinniped for authentication.
 
@@ -162,9 +162,9 @@ At this point, Kubeapps is configured to use a custom interface.
 
 ### Step 2.3: Install Kubeapps
 
-With the configuration out of the way, it's time to install Kubeapps. Since Kubeapps is currently officially delivered as a [Helm chart packaged by Bitnami](https://github.com/bitnami/charts/tree/master/bitnami/kubeapps), the easiest way to install Kubeapps is to add the Bitnami repository to Helm and install it via Helm.
+With the configuration out of the way, it's time to install Kubeapps. Since Kubeapps is currently officially delivered as a [Helm chart packaged by Bitnami](https://github.com/bitnami/charts/tree/main/bitnami/kubeapps), the easiest way to install Kubeapps is to add the Bitnami repository to Helm and install it via Helm.
 
-In case Kubeapps is to be installed in an air-gapped environment, please follow the [offline installation instructions](https://github.com/vmware-tanzu/kubeapps/blob/main/site/content/docs/latest/howto/offline-installation.md) instead.
+To install Kubeapps in an air-gapped environment, please follow the [offline installation instructions](https://github.com/vmware-tanzu/kubeapps/blob/main/site/content/docs/latest/howto/offline-installation.md) instead.
 
 > **TIP**: Typically, the Kubeapps dashboard is set as externally accessible, either by setting the parameter `frontend.service.type=LoadBalancer` (as shown below) or by using an Ingress controller. Please refer to [the Kubeapps documentation covering external access](https://github.com/vmware-tanzu/kubeapps/blob/main/chart/kubeapps/README.md#exposing-externally) for additional information.
 >
@@ -177,21 +177,18 @@ In case Kubeapps is to be installed in an air-gapped environment, please follow 
 Use the commands below to install Kubeapps. The final command assumes that the Kubeapps chart configuration parameters are defined in a file named `custom-values.yaml`, so ensure this file exists before running that command.
 
 ```bash
-# Install the Bitnami helm repository
-helm repo add bitnami https://charts.bitnami.com/bitnami
-
 # Create a 'kubeapps' namespace in our cluster
 kubectl create namespace kubeapps
 
 # Install a 'kubeapps' release in the 'kubeapps' namespace with the values defined at 'custom-values.yaml'
-helm install kubeapps --namespace kubeapps bitnami/kubeapps -f custom-values.yaml
+helm install kubeapps --namespace kubeapps oci://registry-1.docker.io/bitnamicharts/kubeapps -f custom-values.yaml
 ```
 
 Finally, remember to replace the placeholder _Redirect URIs_ you entered when [creating the OAuth2 application during step 1](./step-1.md#create-an-oauth2-application) with the actual value.
 
 For instance, assuming Kubeapps is accessible at `https://kubeapps.example.com` replace `https://localhost/oauth2/callback` with `https://kubeapps.example.com/oauth2/callback`.
 
-> **TIP**: If you are serving Kubeapps from a subpath, for instance, `https://example.com/kubeapps`, you will need to slightly modify the `authProxy` configuration. Please follow [these instructions](https://github.com/vmware-tanzu/kubeapps/blob/main/chart/kubeapps/README.md#serving-kubeapps-in-a-subpath) for further details.
+> **TIP**: If you are serving Kubeapps from a subpath, for instance, `https://example.com/kubeapps`, you need to slightly modify the `authProxy` configuration. Please follow [these instructions](https://github.com/vmware-tanzu/kubeapps/blob/main/chart/kubeapps/README.md#serving-kubeapps-in-a-subpath) for further details.
 
 ![Add name and description](../../img/kubeapps-on-tkg/csp-oauth-redirect.png)
 
@@ -227,7 +224,7 @@ Apply this configuration by running the following command:
 kubectl apply -f kubeapps-rbac.yaml
 ```
 
-At this point, the user having `EMAIL-ADDRESS` email account will have `cluster-admin` access and will be able to perform any desired action via the `kubectl` CLI or the Kubeapps dashboard.
+At this point, the user having `EMAIL-ADDRESS` email account has `cluster-admin` access and is able to perform any desired action via the `kubectl` CLI or the Kubeapps dashboard.
 
 ### Step 2.5: Log in to Kubeapps with OIDC
 
@@ -239,13 +236,13 @@ Once Kubeapps is installed and configured, the next step is to log in and access
    kubectl port-forward -n kubeapps svc/kubeapps 8080:80
    ```
 
-   This will start an HTTP proxy for secure access to the Kubeapps dashboard.
+   This command spawns an HTTP proxy providing secure access to the Kubeapps dashboard.
 
 2. Browse to [http://127.0.0.1:8080](http://127.0.0.1:8080) (when forwarding the port) or to the public IP address of the serevice (when exposing the service externally). You see the Kubeapps login page, as shown below:
 
    ![OIDC login page](../../img/kubeapps-on-tkg/login-oidc-initial.png)
 
-3. Click the _Login_ button. You are redirected to the OIDC provider (in this example, the VMware Cloud Services Portal).
+3. Click the **Login** button. It redirects to the OIDC provider (in this example, the VMware Cloud Services Portal).
 
    ![OIDC login provider](../../img/kubeapps-on-tkg/login-oidc-provider.png)
 
@@ -254,3 +251,10 @@ Once Kubeapps is installed and configured, the next step is to log in and access
    ![Kubeapps home](../../img/kubeapps-on-tkg/kubeapps-applications-empty.png)
 
 At the end of this step, the Kubeapps installation is configured, customized and running in the cluster. The next step is to [add application repositories to Kubeapps](./step-3.md).
+
+## Tutorial index
+
+1. [Step 1: Configure an Identity Management Provider in the Cluster](./step-1.md)
+2. [Step 2: Configure and Install Kubeapps](./step-2.md)
+3. [Step 3: Add Application Repositories to Kubeapps](./step-3.md)
+4. [Step 4: Deploy and Manage Applications with Kubeapps](./step-4.md)

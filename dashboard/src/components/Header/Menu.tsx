@@ -1,4 +1,4 @@
-// Copyright 2020-2022 the Kubeapps contributors.
+// Copyright 2020-2024 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import { CdsButton } from "@cds/react/button";
@@ -6,20 +6,20 @@ import { CdsIcon } from "@cds/react/icon";
 import { CdsToggle } from "@cds/react/toggle";
 import actions from "actions";
 import { getThemeFile } from "components/HeadManager/HeadManager";
+import Row from "components/Row";
+import useOutsideClick from "components/hooks/useOutsideClick";
+import operatorIcon from "icons/olm-icon-white.svg";
 import { useEffect, useRef, useState } from "react";
 import { Helmet } from "react-helmet";
 import { useDispatch, useSelector } from "react-redux";
 import { Link } from "react-router-dom";
 import { CSSTransition } from "react-transition-group";
+import { IClustersState } from "reducers/cluster";
 import { Action } from "redux";
 import { ThunkDispatch } from "redux-thunk";
 import { SupportedThemes } from "shared/Config";
 import { IStoreState } from "shared/types";
 import { app } from "shared/url";
-import operatorIcon from "../../icons/olm-icon-white.svg";
-import { IClustersState } from "../../reducers/cluster";
-import useOutsideClick from "../js/hooks/useOutsideClick/useOutsideClick";
-import Row from "../js/Row";
 import "./Menu.css";
 
 export interface IContextSelectorProps {
@@ -57,7 +57,11 @@ function Menu({ clusters, appVersion, logout }: IContextSelectorProps) {
     <>
       <Helmet>
         {/*  Override the clarity-ui css style */}
-        <link rel="stylesheet" type="text/css" href={getThemeFile(SupportedThemes[theme])} />
+        <link
+          rel="stylesheet"
+          type="text/css"
+          href={getThemeFile(SupportedThemes[theme as keyof typeof SupportedThemes])}
+        />
       </Helmet>
 
       <div className={open ? "drawer-backdrop" : ""} />
@@ -75,7 +79,7 @@ function Menu({ clusters, appVersion, logout }: IContextSelectorProps) {
             <div>
               <label className="dropdown-menu-padding dropdown-menu-label">Administration</label>
               <Link
-                to={app.config.apprepositories(clusters.currentCluster, namespaceSelected)}
+                to={app.config.pkgrepositories(clusters.currentCluster, namespaceSelected)}
                 className="dropdown-menu-link"
                 onClick={toggleOpen}
               >
@@ -101,7 +105,7 @@ function Menu({ clusters, appVersion, logout }: IContextSelectorProps) {
             </div>
             <div>
               <div className="dropdown-menu-subtext">
-                Made with <CdsIcon size="sm" shape="heart" solid={true} /> by VMware and{" "}
+                Made with <CdsIcon size="sm" shape="heart" solid={true} /> by VMware by Broadcom and{" "}
                 <a
                   href="https://github.com/vmware-tanzu/kubeapps/graphs/contributors"
                   className="type-color-white"

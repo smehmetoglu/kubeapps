@@ -1,7 +1,7 @@
 //go:build tools
 // +build tools
 
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 package tools
@@ -11,6 +11,7 @@ package tools
 // prevent tools from inspecting the imports.
 
 import (
+	_ "github.com/bufbuild/connect-go/cmd/protoc-gen-connect-go"
 	_ "github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-grpc-gateway"
 	_ "github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-openapiv2"
 	_ "github.com/spf13/cobra-cli"

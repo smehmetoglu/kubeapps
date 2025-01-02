@@ -1,9 +1,9 @@
-// Copyright 2020-2022 the Kubeapps contributors.
+// Copyright 2020-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import Tabs from "components/Tabs";
 import ResourceTable from "components/AppView/ResourceTable";
-import { ResourceRef } from "gen/kubeappsapis/core/packages/v1alpha1/packages";
+import { ResourceRef } from "gen/kubeappsapis/core/packages/v1alpha1/packages_pb";
 
 interface IAppViewResourceRefs {
   deployments: ResourceRef[];
@@ -55,7 +55,7 @@ export default function ResourceTabs({
       <h3 className="section-title" id="resources-table">
         Application Resources
       </h3>
-      <Tabs id="resource-table-tabs" columns={columns} data={data} />
+      <Tabs id="resource-table-tabs" columns={columns.map(c => [c, () => {}])} data={data} />
     </section>
   );
 }

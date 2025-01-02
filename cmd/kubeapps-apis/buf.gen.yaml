@@ -1,9 +1,14 @@
-# Copyright 2021-2022 the Kubeapps contributors.
+# Copyright 2021-2023 the Kubeapps contributors.
 # SPDX-License-Identifier: Apache-2.0
 
-version: v1beta1
+---
+version: v1
 plugins:
   - name: go
+    out: gen
+    opt:
+      - module=github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen
+  - plugin: buf.build/bufbuild/connect-go:v1.10.0
     out: gen
     opt:
       - module=github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen
@@ -40,13 +45,15 @@ plugins:
       - allow_merge=true
       - merge_file_name=kubeapps-apis
       - allow_repeated_fields_in_body=true
-  # ts_proto plugin generates the typescript grpc-web compliant client for each operation
-  # See https://github.com/stephenh/ts-proto
-  - name: ts_proto
-    path: ../../dashboard/node_modules/.bin/protoc-gen-ts_proto
-    out: ../../dashboard/src/gen
-    strategy: all
+  - name: es
     opt:
-      - outputClientImpl=grpc-web # client implementation it generates
-      - esModuleInterop=true # use imports as required in modern ts setups
-      - useOptionals=messages # use optional TypeScript properties instead of undefined
+      - target=ts
+      - import_extension=none
+    out: ../../dashboard/src/gen
+    path: ../../dashboard/node_modules/.bin/protoc-gen-es
+  - name: connect-es
+    out: ../../dashboard/src/gen
+    opt:
+      - target=ts
+      - import_extension=none
+    path: ../../dashboard/node_modules/.bin/protoc-gen-connect-es

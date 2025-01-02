@@ -1,4 +1,4 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2024 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import { JSONSchemaType } from "ajv";
@@ -8,6 +8,7 @@ import { getType } from "typesafe-actions";
 import actions from "../actions";
 import { PackagesAction } from "../actions/availablepackages";
 import { NamespaceAction } from "../actions/namespace";
+import { AvailablePackageDetail } from "gen/kubeappsapis/core/packages/v1alpha1/packages_pb";
 
 export const initialState: IPackageState = {
   isFetching: false,
@@ -17,9 +18,27 @@ export const initialState: IPackageState = {
   categories: [],
   selected: {
     versions: [],
+    metadatas: [],
   },
   size: 20,
 };
+
+// defaultValues determines whether the package defaults or custom default
+// values should be used.
+export function defaultValues(pkg: AvailablePackageDetail, customDefault?: string) {
+  const additionalValues = Object.values(pkg.additionalDefaultValues || []);
+  if (additionalValues.length === 1) {
+    return additionalValues[0];
+  }
+  if (
+    additionalValues.length > 1 &&
+    customDefault &&
+    customDefault in pkg.additionalDefaultValues
+  ) {
+    return pkg.additionalDefaultValues[customDefault];
+  }
+  return pkg.defaultValues || "";
+}
 
 const selectedPackageReducer = (
   state: IPackageState["selected"],
@@ -35,17 +54,28 @@ const selectedPackageReducer = (
         pkgVersion: action.payload.selectedPackage.version?.pkgVersion,
         appVersion: action.payload.selectedPackage.version?.appVersion,
         readme: action.payload.selectedPackage.readme,
-        values: action.payload.selectedPackage.defaultValues,
+        values: defaultValues(action.payload.selectedPackage),
         schema:
           action.payload.selectedPackage.valuesSchema !== ""
             ? (JSON.parse(action.payload.selectedPackage.valuesSchema) as JSONSchemaType<any>)
             : ({} as JSONSchemaType<any>),
+      };
+    case getType(actions.availablepackages.setAvailablePackageDetailCustomDefaults):
+      return {
+        ...state,
+        values: defaultValues(state.availablePackageDetail!, action.payload.customDefault),
       };
     case getType(actions.availablepackages.receiveSelectedAvailablePackageVersions):
       return {
         ...state,
         error: undefined,
         versions: action.payload.packageAppVersions,
+      };
+    case getType(actions.availablepackages.receiveAvailablePackageMetadatas):
+      return {
+        ...state,
+        error: undefined,
+        metadatas: action.payload.packageMetadata,
       };
     case getType(actions.availablepackages.createErrorPackage):
       return { ...state, error: action.payload };
@@ -64,7 +94,6 @@ const packageReducer = (
 ): IPackageState => {
   switch (action.type) {
     case getType(actions.availablepackages.requestAvailablePackageSummaries):
-      return { ...state, isFetching: true };
     case getType(actions.availablepackages.requestSelectedAvailablePackageVersions):
       return { ...state, isFetching: true };
     case getType(actions.availablepackages.receiveAvailablePackageSummaries): {
@@ -92,6 +121,7 @@ const packageReducer = (
       };
     }
     case getType(actions.availablepackages.receiveSelectedAvailablePackageVersions):
+    case getType(actions.availablepackages.receiveSelectedAvailablePackageDetail):
       return {
         ...state,
         isFetching: false,
@@ -103,10 +133,9 @@ const packageReducer = (
         isFetching: true,
         selected: selectedPackageReducer(state.selected, action),
       };
-    case getType(actions.availablepackages.receiveSelectedAvailablePackageDetail):
+    case getType(actions.availablepackages.setAvailablePackageDetailCustomDefaults):
       return {
         ...state,
-        isFetching: false,
         selected: selectedPackageReducer(state.selected, action),
       };
     case getType(actions.availablepackages.resetAvailablePackageSummaries):

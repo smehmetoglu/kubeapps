@@ -1,8 +1,8 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 /*
- Utility functions that apply to "packages", e.g. helm charts or carvel packages
+Utility functions that apply to "packages", e.g. helm charts or carvel packages
 */
 package pkgutils
 
@@ -16,16 +16,16 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/bufbuild/connect-go"
 	corev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/packages/v1alpha1"
 	plugins "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/plugins/v1alpha1"
 	"github.com/vmware-tanzu/kubeapps/pkg/chart/models"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"gopkg.in/yaml.v3" // The usual "sigs.k8s.io/yaml" doesn't work: https://github.com/vmware-tanzu/kubeapps/pull/4050
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	structuralschema "k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	log "k8s.io/klog/v2"
 )
 
 // Contains miscellaneous package-utilities used by multiple plug-ins
@@ -54,37 +54,52 @@ func GetDefaultVersionsInSummary() VersionsInSummary {
 	return defaultVersionsInSummary
 }
 
-type packageSemVersion struct {
+type PackageSemVersion struct {
 	*semver.Version
-	appVersion string
+	AppVersion string
 }
 
-func sortByPackageVersion(versions []models.ChartVersion) []*packageSemVersion {
-	var sortedVersions []*packageSemVersion
+func SortByPackageVersion(versions []models.ChartVersion) ([]*PackageSemVersion, error) {
+	var sortedVersions []*PackageSemVersion
 	for _, v := range versions {
 		version, err := semver.NewVersion(v.Version)
 		if err != nil {
-			continue
+			return nil, err
+		}
+		if version.String() != v.Version {
+			return nil, fmt.Errorf("chart version %q is not semver", v.Version)
 		}
 
-		sortedVersions = append(sortedVersions, &packageSemVersion{
+		sortedVersions = append(sortedVersions, &PackageSemVersion{
 			Version:    version,
-			appVersion: v.AppVersion,
+			AppVersion: v.AppVersion,
 		})
 	}
 	sort.Slice(sortedVersions, func(i, j int) bool {
 		return sortedVersions[i].Version.GreaterThan(sortedVersions[j].Version)
 	})
-	return sortedVersions
+	return sortedVersions, nil
 }
 
 // PackageAppVersionsSummary converts the model chart versions into the required version summary.
 func PackageAppVersionsSummary(versions []models.ChartVersion, versionInSummary VersionsInSummary) []*corev1.PackageAppVersion {
 
-	// Sort versions
-	sortedVersions := sortByPackageVersion(versions)
-
 	var pav []*corev1.PackageAppVersion
+
+	// Sort versions
+	sortedVersions, err := SortByPackageVersion(versions)
+	if err != nil {
+		// If there was an error parsing a version as semver, we log the error
+		// and simply return the versions, as Helm does.
+		log.Errorf("Error parsing versions as semver: %v", err)
+		for _, version := range versions {
+			pav = append(pav, &corev1.PackageAppVersion{
+				PkgVersion: version.Version,
+				AppVersion: version.AppVersion,
+			})
+		}
+		return pav
+	}
 
 	// Use a version map to be able to count how many major, minor and patch versions
 	// we have included.
@@ -112,7 +127,7 @@ func PackageAppVersionsSummary(versions []models.ChartVersion, versionInSummary 
 		// Include the version and update the version map.
 		pav = append(pav, &corev1.PackageAppVersion{
 			PkgVersion: version.Version.String(),
-			AppVersion: version.appVersion,
+			AppVersion: version.AppVersion,
 		})
 
 		if _, ok := versionMap[version.Major()]; !ok {
@@ -130,26 +145,26 @@ func PackageAppVersionsSummary(versions []models.ChartVersion, versionInSummary 
 // together with required fields for our model.
 func IsValidChart(chart *models.Chart) (bool, error) {
 	if chart.Name == "" {
-		return false, status.Errorf(codes.Internal, "required field .Name not found on helm chart: %v", chart)
+		return false, connect.NewError(connect.CodeInternal, fmt.Errorf("Required field .Name not found on helm chart: %v", chart))
 	}
 	if chart.ID == "" {
-		return false, status.Errorf(codes.Internal, "required field .ID not found on helm chart: %v", chart)
+		return false, connect.NewError(connect.CodeInternal, fmt.Errorf("Required field .ID not found on helm chart: %v", chart))
 	}
 	if chart.Repo == nil {
-		return false, status.Errorf(codes.Internal, "required field .Repo not found on helm chart: %v", chart)
+		return false, connect.NewError(connect.CodeInternal, fmt.Errorf("Required field .Repo not found on helm chart: %v", chart))
 	}
-	if chart.ChartVersions == nil || len(chart.ChartVersions) == 0 {
-		return false, status.Errorf(codes.Internal, "required field .chart.ChartVersions[0] not found on helm chart: %v", chart)
+	if len(chart.ChartVersions) == 0 {
+		return false, connect.NewError(connect.CodeInternal, fmt.Errorf("Required field .chart.ChartVersions not found on helm chart or is empty: %v", chart))
 	} else {
 		for _, chartVersion := range chart.ChartVersions {
 			if chartVersion.Version == "" {
-				return false, status.Errorf(codes.Internal, "required field .ChartVersions[i].Version not found on helm chart: %v", chart)
+				return false, connect.NewError(connect.CodeInternal, fmt.Errorf("Required field .ChartVersions[i].Version not found on helm chart: %v", chart))
 			}
 		}
 	}
 	for _, maintainer := range chart.Maintainers {
 		if maintainer.Name == "" {
-			return false, status.Errorf(codes.Internal, "required field .Maintainers[i].Name not found on helm chart: %v", chart)
+			return false, connect.NewError(connect.CodeInternal, fmt.Errorf("Required field .Maintainers[i].Name not found on helm chart: %v", chart))
 		}
 	}
 	return true, nil
@@ -161,7 +176,7 @@ func AvailablePackageSummaryFromChart(chart *models.Chart, plugin *plugins.Plugi
 
 	isValid, err := IsValidChart(chart)
 	if !isValid || err != nil {
-		return nil, status.Errorf(codes.Internal, "invalid chart: %s", err.Error())
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Invalid chart: %s", err.Error()))
 	}
 
 	pkg.Name = chart.Name
@@ -182,15 +197,26 @@ func AvailablePackageSummaryFromChart(chart *models.Chart, plugin *plugins.Plugi
 	pkg.AvailablePackageRef.Context = &corev1.Context{Namespace: chart.Repo.Namespace}
 
 	if chart.ChartVersions != nil || len(chart.ChartVersions) != 0 {
-		pkg.LatestVersion = &corev1.PackageAppVersion{
-			PkgVersion: chart.ChartVersions[0].Version,
-			AppVersion: chart.ChartVersions[0].AppVersion,
+		sortedVersions, err := SortByPackageVersion(chart.ChartVersions)
+		if err != nil {
+			// If there was an error parsing a version as semver, fall back to ChartVersions[0]
+			log.Errorf("Error parsing versions as semver: %v", err)
+			pkg.LatestVersion = &corev1.PackageAppVersion{
+				PkgVersion: chart.ChartVersions[0].Version,
+				AppVersion: chart.ChartVersions[0].AppVersion,
+			}
+		} else {
+			pkg.LatestVersion = &corev1.PackageAppVersion{
+				PkgVersion: sortedVersions[0].Version.String(),
+				AppVersion: sortedVersions[0].AppVersion,
+			}
 		}
 	}
 
 	return pkg, nil
 }
 
+// TODO(agamez): I have replaced chart.ChartVersions[0] with SortByPackageVersion(...)[0]
 // TODO @gfichtenholt: I really wanted to put helm plugin's implementation of AvailablePackageDetailFromChart()
 // here, and use it in flux plugin as well. But I found out a couple of flaws in the implementation and decided
 // against it. Namely:
@@ -213,7 +239,7 @@ func AvailablePackageSummaryFromChart(chart *models.Chart, plugin *plugins.Plugi
 func GetUnescapedPackageID(packageID string) (string, error) {
 	unescapedPackageID, err := url.QueryUnescape(packageID)
 	if err != nil {
-		return "", status.Errorf(codes.InvalidArgument, "Unable to decode package ID: %v", packageID)
+		return "", fmt.Errorf("unable to decode package ID: %v. %w", packageID, err)
 	}
 	// Ensure it has at least a / character, like "my-repo/foo/bar"
 	if idx := strings.IndexByte(unescapedPackageID, '/'); idx >= 0 {
@@ -221,7 +247,7 @@ func GetUnescapedPackageID(packageID string) (string, error) {
 		id := url.QueryEscape(unescapedPackageID[idx+1:])   // the rest is the package name, which should remain escaped
 		unescapedPackageID = fmt.Sprintf("%s/%s", repo, id) // combine the repo and package name like "my-repo/foo%2Fbar"
 	} else {
-		return "", status.Errorf(codes.InvalidArgument, "Incorrect package ref dentifier, expecting 'my-repo/foo/.../bar' %s", packageID)
+		return "", fmt.Errorf("incorrect package ref identifier, expecting 'my-repo/foo/.../bar' %s", packageID)
 	}
 	return unescapedPackageID, nil
 }

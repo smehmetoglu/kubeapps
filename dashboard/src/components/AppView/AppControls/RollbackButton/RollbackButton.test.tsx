@@ -1,21 +1,21 @@
-// Copyright 2019-2022 the Kubeapps contributors.
+// Copyright 2019-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import { CdsButton } from "@cds/react/button";
 import { CdsModal } from "@cds/react/modal";
+import { act, waitFor } from "@testing-library/react";
 import actions from "actions";
-import Alert from "components/js/Alert";
+import AlertGroup from "components/AlertGroup";
 import {
   InstalledPackageReference,
   InstalledPackageStatus,
   InstalledPackageStatus_StatusReason,
-} from "gen/kubeappsapis/core/packages/v1alpha1/packages";
-import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins";
-import { act } from "react-dom/test-utils";
+} from "gen/kubeappsapis/core/packages/v1alpha1/packages_pb";
+import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins_pb";
 import * as ReactRedux from "react-redux";
-import ReactTooltip from "react-tooltip";
+import { Tooltip } from "react-tooltip";
 import { defaultStore, getStore, mountWrapper } from "shared/specs/mountWrapper";
-import { RollbackError } from "shared/types";
+import { IInstalledPackageState, RollbackError } from "shared/types";
 import RollbackButton from "./RollbackButton";
 
 const defaultProps = {
@@ -30,7 +30,7 @@ const defaultProps = {
 };
 
 let spyOnUseDispatch: jest.SpyInstance;
-const kubeaActions = { ...actions.kube };
+const kubeActions = { ...actions.kube };
 beforeEach(() => {
   actions.installedpackages = {
     ...actions.installedpackages,
@@ -41,7 +41,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  actions.kube = { ...kubeaActions };
+  actions.kube = { ...kubeActions };
   spyOnUseDispatch.mockRestore();
 });
 
@@ -70,7 +70,9 @@ it("rolls back an application", async () => {
 });
 
 it("renders an error", async () => {
-  const store = getStore({ apps: { error: new RollbackError("Boom!") } });
+  const store = getStore({
+    apps: { error: new RollbackError("Boom!") },
+  } as Partial<IInstalledPackageState>);
   const wrapper = mountWrapper(store, <RollbackButton {...defaultProps} />);
   // Open modal
   act(() => {
@@ -78,7 +80,7 @@ it("renders an error", async () => {
   });
   wrapper.update();
 
-  expect(wrapper.find(Alert)).toIncludeText("Boom!");
+  expect(wrapper.find(AlertGroup)).toIncludeText("Boom!");
 });
 
 it("should render a deactivated button if when passing an in-progress status", async () => {
@@ -86,12 +88,15 @@ it("should render a deactivated button if when passing an in-progress status", a
     ...defaultProps,
     releaseStatus: {
       ready: false,
-      reason: InstalledPackageStatus_StatusReason.STATUS_REASON_PENDING,
+      reason: InstalledPackageStatus_StatusReason.PENDING,
       userReason: "Pending",
     } as InstalledPackageStatus,
   };
   const wrapper = mountWrapper(defaultStore, <RollbackButton {...disabledProps} />);
 
   expect(wrapper.find(CdsButton)).toBeDisabled();
-  expect(wrapper.find(ReactTooltip)).toExist();
+
+  await waitFor(() => {
+    expect(wrapper.find(Tooltip).prop("children")).toBe("The application is pending installation.");
+  });
 });

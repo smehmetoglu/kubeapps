@@ -7,20 +7,22 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"testing"
 
 	appRepov1 "github.com/vmware-tanzu/kubeapps/cmd/apprepository-controller/pkg/apis/apprepository/v1alpha1"
 	corev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/packages/v1alpha1"
 	plugins "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/plugins/v1alpha1"
-	httpclient "github.com/vmware-tanzu/kubeapps/pkg/http-client"
 	apiv1 "k8s.io/api/core/v1"
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	log "k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -71,15 +73,17 @@ func lessPackageRepositorySummaryFunc(p1, p2 *corev1.PackageRepositorySummary) b
 	return p1.Name < p2.Name
 }
 
-// ref: https://kubernetes.io/docs/concepts/configuration/secret/#basic-authentication-secret
 func newBasicAuthSecret(name, namespace, username, password string) *apiv1.Secret {
 	authString := fmt.Sprintf("%s:%s", username, password)
 	authHeader := fmt.Sprintf("Basic %s", base64.StdEncoding.EncodeToString([]byte(authString)))
-	return newAuthTokenSecret(name, namespace, authHeader)
+	return newHeaderAuthSecret(name, namespace, authHeader)
 }
 
-// ref: https://kubernetes.io/docs/concepts/configuration/secret/#basic-authentication-secret
-func newAuthTokenSecret(name, namespace, token string) *apiv1.Secret {
+func newBearerAuthSecret(name, namespace, token string) *apiv1.Secret {
+	return newHeaderAuthSecret(name, namespace, "Bearer "+token)
+}
+
+func newHeaderAuthSecret(name, namespace, header string) *apiv1.Secret {
 	return &apiv1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -87,7 +91,7 @@ func newAuthTokenSecret(name, namespace, token string) *apiv1.Secret {
 		},
 		Type: apiv1.SecretTypeOpaque,
 		Data: map[string][]byte{
-			"authorizationHeader": []byte(token),
+			"authorizationHeader": []byte(header),
 		},
 	}
 }
@@ -105,6 +109,11 @@ func newAuthDockerSecret(name, namespace, jsonData string) *apiv1.Secret {
 	}
 }
 
+func dockerAuthJson(server, username, password, email, auth string) string {
+	return fmt.Sprintf("{\"auths\":{\"%s\":{\"username\":\"%s\",\"password\":\"%s\",\"email\":\"%s\",\"auth\":\"%s\"}}}",
+		server, username, password, email, auth)
+}
+
 func setSecretOwnerRef(repoName string, secret *apiv1.Secret) *apiv1.Secret {
 	tRue := true
 	secret.OwnerReferences = []metav1.OwnerReference{
@@ -119,6 +128,11 @@ func setSecretOwnerRef(repoName string, secret *apiv1.Secret) *apiv1.Secret {
 	return secret
 }
 
+func setSecretAnnotations(secret *apiv1.Secret) *apiv1.Secret {
+	secret.ObjectMeta.Annotations = map[string]string{Annotation_ManagedBy_Key: Annotation_ManagedBy_Value}
+	return secret
+}
+
 // Note that according to https://kubernetes.io/docs/concepts/configuration/secret/#tls-secrets
 // TLS secrets need to look one way, but according to
 func newTlsSecret(name, namespace string, pub, priv, ca []byte) *apiv1.Secret {
@@ -130,40 +144,47 @@ func newTlsSecret(name, namespace string, pub, priv, ca []byte) *apiv1.Secret {
 		Type: apiv1.SecretTypeOpaque,
 		Data: map[string][]byte{},
 	}
+	return addTlsToSecret(s, pub, priv, ca)
+}
+
+func addTlsToSecret(secret *apiv1.Secret, pub, priv, ca []byte) *apiv1.Secret {
 	if pub != nil {
-		s.Data["certFile"] = pub
+		secret.Data["certFile"] = pub
 	}
 	if priv != nil {
-		s.Data["keyFile"] = priv
+		secret.Data["keyFile"] = priv
 	}
 	if ca != nil {
-		s.Data["ca.crt"] = ca
+		secret.Data["ca.crt"] = ca
 	}
-	return s
+	return secret
 }
 
-func newRepoHttpClient(responses map[string]*http.Response) newRepoClient {
-	return func(appRepo *appRepov1.AppRepository, secret *apiv1.Secret) (httpclient.Client, error) {
-		return &fakeHTTPClient{
-			responses: responses,
-		}, nil
-	}
-}
-
-type fakeHTTPClient struct {
-	responses map[string]*http.Response
-}
-
-func (f *fakeHTTPClient) Do(h *http.Request) (*http.Response, error) {
-	if resp, ok := f.responses[h.URL.String()]; !ok {
-		return nil, fmt.Errorf("url requested '%s' not found in valid responses %v", h.URL.String(), f.responses)
-	} else {
-		return resp, nil
-	}
+func newFakeRepoServer(t *testing.T, responses map[string]*http.Response) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for path, response := range responses {
+			if path == r.URL.Path {
+				w.WriteHeader(response.StatusCode)
+				body := []byte{}
+				if response.Body != nil {
+					var err error
+					body, err = io.ReadAll(response.Body)
+					if err != nil {
+						t.Fatalf("%+v", err)
+					}
+				}
+				_, err := w.Write(body)
+				if err != nil {
+					t.Fatalf("%+v", err)
+				}
+				return
+			}
+		}
+	}))
 }
 
 func httpResponse(statusCode int, body string) *http.Response {
-	return &http.Response{StatusCode: statusCode, Body: ioutil.NopCloser(bytes.NewReader([]byte(body)))}
+	return &http.Response{StatusCode: statusCode, Body: io.NopCloser(bytes.NewReader([]byte(body)))}
 }
 
 func testCert(name string) string {
@@ -177,11 +198,11 @@ func testYaml(name string) string {
 // generate-cert.sh script in testdata directory is used to generate these files
 func getCertsForTesting(t *testing.T) (ca, pub, priv []byte) {
 	var err error
-	if ca, err = ioutil.ReadFile(testCert("ca.pem")); err != nil {
+	if ca, err = os.ReadFile(testCert("ca.pem")); err != nil {
 		t.Fatalf("%+v", err)
-	} else if pub, err = ioutil.ReadFile(testCert("server.pem")); err != nil {
+	} else if pub, err = os.ReadFile(testCert("server.pem")); err != nil {
 		t.Fatalf("%+v", err)
-	} else if priv, err = ioutil.ReadFile(testCert("server-key.pem")); err != nil {
+	} else if priv, err = os.ReadFile(testCert("server-key.pem")); err != nil {
 		t.Fatalf("%+v", err)
 	}
 	return ca, pub, priv
@@ -190,9 +211,12 @@ func getCertsForTesting(t *testing.T) (ca, pub, priv []byte) {
 func newCtrlClient(repos []*appRepov1.AppRepository) client.WithWatch {
 	// Register required schema definitions
 	scheme := runtime.NewScheme()
-	appRepov1.AddToScheme(scheme)
+	err := appRepov1.AddToScheme(scheme)
+	if err != nil {
+		log.Fatalf("%s", err)
+	}
 
-	rm := apimeta.NewDefaultRESTMapper([]schema.GroupVersion{{AppRepositoryGroup, AppRepositoryVersion}})
+	rm := apimeta.NewDefaultRESTMapper([]schema.GroupVersion{{Group: AppRepositoryGroup, Version: AppRepositoryVersion}})
 	rm.Add(schema.GroupVersionKind{
 		Group:   AppRepositoryGroup,
 		Version: AppRepositoryVersion,

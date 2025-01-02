@@ -1,4 +1,4 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 package pkgutils
@@ -9,13 +9,12 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/bufbuild/connect-go"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/packages/v1alpha1"
 	plugins "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/plugins/v1alpha1"
 	"github.com/vmware-tanzu/kubeapps/pkg/chart/models"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"helm.sh/helm/v3/pkg/chart"
 	structuralschema "k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
 )
@@ -363,6 +362,18 @@ func TestPackageAppVersionsSummary(t *testing.T) {
 			},
 			input_versions_in_summary: GetDefaultVersionsInSummary(),
 		},
+		{
+			name: "it just returns versions that are not semver without any filtering or ordering",
+			chart_versions: []models.ChartVersion{
+				{Version: "v12-main", AppVersion: DefaultAppVersion},
+				{Version: "v11-main", AppVersion: DefaultAppVersion},
+			},
+			version_summary: []*corev1.PackageAppVersion{
+				{PkgVersion: "v12-main", AppVersion: DefaultAppVersion},
+				{PkgVersion: "v11-main", AppVersion: DefaultAppVersion},
+			},
+			input_versions_in_summary: GetDefaultVersionsInSummary(),
+		},
 	}
 
 	opts := cmpopts.IgnoreUnexported(corev1.PackageAppVersion{})
@@ -387,7 +398,7 @@ func TestIsValidChart(t *testing.T) {
 			in: &models.Chart{
 				Name: "foo",
 				ID:   "foo/bar",
-				Repo: &models.Repo{
+				Repo: &models.AppRepository{
 					Name:      "bar",
 					Namespace: "my-ns",
 				},
@@ -403,7 +414,7 @@ func TestIsValidChart(t *testing.T) {
 			name: "it returns false if the chart name is missing",
 			in: &models.Chart{
 				ID: "foo/bar",
-				Repo: &models.Repo{
+				Repo: &models.AppRepository{
 					Name:      "bar",
 					Namespace: "my-ns",
 				},
@@ -419,7 +430,7 @@ func TestIsValidChart(t *testing.T) {
 			name: "it returns false if the chart ID is missing",
 			in: &models.Chart{
 				Name: "foo",
-				Repo: &models.Repo{
+				Repo: &models.AppRepository{
 					Name:      "bar",
 					Namespace: "my-ns",
 				},
@@ -469,7 +480,7 @@ func TestIsValidChart(t *testing.T) {
 			in: &models.Chart{
 				Name: "foo",
 				ID:   "foo/bar",
-				Repo: &models.Repo{
+				Repo: &models.AppRepository{
 					Name:      "bar",
 					Namespace: "my-ns",
 				},
@@ -512,10 +523,10 @@ func TestAvailablePackageSummaryFromChart(t *testing.T) {
 	invalidChart := &models.Chart{Name: "foo"}
 
 	testCases := []struct {
-		name       string
-		in         *models.Chart
-		expected   *corev1.AvailablePackageSummary
-		statusCode codes.Code
+		name      string
+		in        *models.Chart
+		expected  *corev1.AvailablePackageSummary
+		errorCode connect.Code
 	}{
 		{
 			name: "it returns a complete AvailablePackageSummary for a complete chart",
@@ -525,15 +536,15 @@ func TestAvailablePackageSummaryFromChart(t *testing.T) {
 				Category:    DefaultChartCategory,
 				Description: "best chart",
 				Icon:        "foo.bar/icon.svg",
-				Repo: &models.Repo{
+				Repo: &models.AppRepository{
 					Name:      "bar",
 					Namespace: "my-ns",
 				},
 				Maintainers: []chart.Maintainer{{Name: "me", Email: "me@me.me"}},
 				ChartVersions: []models.ChartVersion{
-					{Version: "3.0.0", AppVersion: DefaultAppVersion, Readme: "chart readme", Values: "chart values", Schema: "chart schema"},
-					{Version: "2.0.0", AppVersion: DefaultAppVersion, Readme: "chart readme", Values: "chart values", Schema: "chart schema"},
-					{Version: "1.0.0", AppVersion: DefaultAppVersion, Readme: "chart readme", Values: "chart values", Schema: "chart schema"},
+					{Version: "1.0.0", AppVersion: DefaultAppVersion, Readme: "chart readme", DefaultValues: "chart values", Schema: "chart schema"},
+					{Version: "2.0.0", AppVersion: DefaultAppVersion, Readme: "chart readme", DefaultValues: "chart values", Schema: "chart schema"},
+					{Version: "3.0.0", AppVersion: DefaultAppVersion, Readme: "chart readme", DefaultValues: "chart values", Schema: "chart schema"},
 				},
 			},
 			expected: &corev1.AvailablePackageSummary{
@@ -552,14 +563,13 @@ func TestAvailablePackageSummaryFromChart(t *testing.T) {
 					Plugin:     &plugins.Plugin{Name: "helm.packages", Version: "v1alpha1"},
 				},
 			},
-			statusCode: codes.OK,
 		},
 		{
 			name: "it returns a valid AvailablePackageSummary if the minimal chart is correct",
 			in: &models.Chart{
 				Name: "foo",
 				ID:   "foo/bar",
-				Repo: &models.Repo{
+				Repo: &models.AppRepository{
 					Name:      "bar",
 					Namespace: "my-ns",
 				},
@@ -584,17 +594,16 @@ func TestAvailablePackageSummaryFromChart(t *testing.T) {
 					Plugin:     &plugins.Plugin{Name: "helm.packages", Version: "v1alpha1"},
 				},
 			},
-			statusCode: codes.OK,
 		},
 		{
-			name:       "it returns internal error if empty chart",
-			in:         &models.Chart{},
-			statusCode: codes.Internal,
+			name:      "it returns internal error if empty chart",
+			in:        &models.Chart{},
+			errorCode: connect.CodeInternal,
 		},
 		{
-			name:       "it returns internal error if chart is invalid",
-			in:         invalidChart,
-			statusCode: codes.Internal,
+			name:      "it returns internal error if chart is invalid",
+			in:        invalidChart,
+			errorCode: connect.CodeInternal,
 		},
 	}
 
@@ -607,11 +616,11 @@ func TestAvailablePackageSummaryFromChart(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			availablePackageSummary, err := AvailablePackageSummaryFromChart(tc.in, &pluginDetail)
 
-			if got, want := status.Code(err), tc.statusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.errorCode; err != nil && got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 			}
 
-			if tc.statusCode == codes.OK {
+			if tc.errorCode == 0 {
 				opt1 := cmpopts.IgnoreUnexported(corev1.AvailablePackageDetail{}, corev1.AvailablePackageSummary{}, corev1.AvailablePackageReference{}, corev1.Context{}, plugins.Plugin{}, corev1.Maintainer{}, corev1.PackageAppVersion{})
 				if got, want := availablePackageSummary, tc.expected; !cmp.Equal(got, want, opt1) {
 					t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, opt1))
@@ -623,49 +632,46 @@ func TestAvailablePackageSummaryFromChart(t *testing.T) {
 
 func TestGetUnescapedPackageID(t *testing.T) {
 	testCases := []struct {
-		name       string
-		in         string
-		out        string
-		statusCode codes.Code
+		name          string
+		in            string
+		out           string
+		expectedError bool
 	}{
 		{
-			name:       "it returns a chartID for a valid input",
-			in:         "foo/bar",
-			out:        "foo/bar",
-			statusCode: codes.OK,
+			name: "it returns a chartID for a valid input",
+			in:   "foo/bar",
+			out:  "foo/bar",
 		},
 		{
-			name:       "it returns a chartID for a valid input (2)",
-			in:         "foo%2Fbar",
-			out:        "foo/bar",
-			statusCode: codes.OK,
+			name: "it returns a chartID for a valid input (2)",
+			in:   "foo%2Fbar",
+			out:  "foo/bar",
 		},
 		{
-			name:       "allows chart with multiple slashes",
-			in:         "foo/bar/zot",
-			out:        "foo/bar%2Fzot",
-			statusCode: codes.OK,
+			name: "allows chart with multiple slashes",
+			in:   "foo/bar/zot",
+			out:  "foo/bar%2Fzot",
 		},
 		{
-			name:       "it fails for an invalid chartID",
-			in:         "foo%ZZbar",
-			statusCode: codes.InvalidArgument,
+			name:          "it fails for an invalid chartID",
+			in:            "foo%ZZbar",
+			expectedError: true,
 		},
 		{
-			name:       "it fails for an invalid chartID (2)",
-			in:         "foo",
-			statusCode: codes.InvalidArgument,
+			name:          "it fails for an invalid chartID (2)",
+			in:            "foo",
+			expectedError: true,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			actualOut, err := GetUnescapedPackageID(tc.in)
-			if got, want := status.Code(err), tc.statusCode; got != want {
+			if got, want := err != nil, tc.expectedError; got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 			}
 
-			if tc.statusCode == codes.OK {
+			if tc.expectedError == false {
 				if got, want := actualOut, tc.out; !cmp.Equal(got, want) {
 					t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got))
 				}
@@ -676,41 +682,39 @@ func TestGetUnescapedPackageID(t *testing.T) {
 
 func TestSplitPackageIdentifier(t *testing.T) {
 	testCases := []struct {
-		name       string
-		in         string
-		repoName   string
-		chartName  string
-		statusCode codes.Code
+		name      string
+		in        string
+		repoName  string
+		chartName string
+		error     bool
 	}{
 		{
-			name:       "it returns a repoName and chartName for a valid input",
-			in:         "foo/bar",
-			repoName:   "foo",
-			chartName:  "bar",
-			statusCode: codes.OK,
+			name:      "it returns a repoName and chartName for a valid input",
+			in:        "foo/bar",
+			repoName:  "foo",
+			chartName: "bar",
 		},
 		{
-			name:       "it allows chart with multiple slashes",
-			in:         "foo/bar/zot",
-			repoName:   "foo",
-			chartName:  "bar%2Fzot",
-			statusCode: codes.OK,
+			name:      "it allows chart with multiple slashes",
+			in:        "foo/bar/zot",
+			repoName:  "foo",
+			chartName: "bar%2Fzot",
 		},
 		{
-			name:       "it fails for invalid input",
-			in:         "foo",
-			statusCode: codes.InvalidArgument,
+			name:  "it fails for invalid input",
+			in:    "foo",
+			error: true,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			repoName, chartName, err := SplitPackageIdentifier(tc.in)
-			if got, want := status.Code(err), tc.statusCode; got != want {
+			if got, want := err != nil, tc.error; got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 			}
 
-			if tc.statusCode == codes.OK {
+			if !tc.error {
 				if got, want := repoName, tc.repoName; !cmp.Equal(got, want) {
 					t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got))
 				}
@@ -861,13 +865,13 @@ func TestDefaultValues(t *testing.T) {
 		{"empty", "null", nil, "null"},
 		{"scalar", "4", &structuralschema.Structural{
 			Generic: structuralschema.Generic{
-				Default: structuralschema.JSON{"foo"},
+				Default: structuralschema.JSON{Object: "foo"},
 			},
 		}, "4"},
 		{"scalar array", "[1,2]", &structuralschema.Structural{
 			Items: &structuralschema.Structural{
 				Generic: structuralschema.Generic{
-					Default: structuralschema.JSON{"foo"},
+					Default: structuralschema.JSON{Object: "foo"},
 				},
 			},
 		}, "[1,2]"},
@@ -876,17 +880,17 @@ func TestDefaultValues(t *testing.T) {
 				Properties: map[string]structuralschema.Structural{
 					"a": {
 						Generic: structuralschema.Generic{
-							Default: structuralschema.JSON{"A"},
+							Default: structuralschema.JSON{Object: "A"},
 						},
 					},
 					"b": {
 						Generic: structuralschema.Generic{
-							Default: structuralschema.JSON{"B"},
+							Default: structuralschema.JSON{Object: "B"},
 						},
 					},
 					"c": {
 						Generic: structuralschema.Generic{
-							Default: structuralschema.JSON{"C"},
+							Default: structuralschema.JSON{Object: "C"},
 						},
 					},
 				},
@@ -942,12 +946,12 @@ func TestDefaultValues(t *testing.T) {
 						Properties: map[string]structuralschema.Structural{
 							"a": {
 								Generic: structuralschema.Generic{
-									Default: structuralschema.JSON{"A"},
+									Default: structuralschema.JSON{Object: "A"},
 								},
 							},
 							"b": {
 								Generic: structuralschema.Generic{
-									Default: structuralschema.JSON{"B"},
+									Default: structuralschema.JSON{Object: "B"},
 								},
 							},
 						},
@@ -957,12 +961,12 @@ func TestDefaultValues(t *testing.T) {
 					Properties: map[string]structuralschema.Structural{
 						"a": {
 							Generic: structuralschema.Generic{
-								Default: structuralschema.JSON{"N"},
+								Default: structuralschema.JSON{Object: "N"},
 							},
 						},
 						"b": {
 							Generic: structuralschema.Generic{
-								Default: structuralschema.JSON{"O"},
+								Default: structuralschema.JSON{Object: "O"},
 							},
 						},
 					},
@@ -974,12 +978,12 @@ func TestDefaultValues(t *testing.T) {
 								Properties: map[string]structuralschema.Structural{
 									"a": {
 										Generic: structuralschema.Generic{
-											Default: structuralschema.JSON{"alpha"},
+											Default: structuralschema.JSON{Object: "alpha"},
 										},
 									},
 									"b": {
 										Generic: structuralschema.Generic{
-											Default: structuralschema.JSON{"beta"},
+											Default: structuralschema.JSON{Object: "beta"},
 										},
 									},
 								},
@@ -989,7 +993,7 @@ func TestDefaultValues(t *testing.T) {
 				},
 				"foo": {
 					Generic: structuralschema.Generic{
-						Default: structuralschema.JSON{"bar"},
+						Default: structuralschema.JSON{Object: "bar"},
 					},
 				},
 			},
@@ -999,7 +1003,7 @@ func TestDefaultValues(t *testing.T) {
 				Properties: map[string]structuralschema.Structural{
 					"a": {
 						Generic: structuralschema.Generic{
-							Default: structuralschema.JSON{"A"},
+							Default: structuralschema.JSON{Object: "A"},
 						},
 					},
 				},
@@ -1013,7 +1017,7 @@ func TestDefaultValues(t *testing.T) {
 				Properties: map[string]structuralschema.Structural{
 					"a": {
 						Generic: structuralschema.Generic{
-							Default: structuralschema.JSON{"A"},
+							Default: structuralschema.JSON{Object: "A"},
 						},
 					},
 				},
@@ -1025,7 +1029,7 @@ func TestDefaultValues(t *testing.T) {
 			},
 			Items: &structuralschema.Structural{
 				Generic: structuralschema.Generic{
-					Default: structuralschema.JSON{"A"},
+					Default: structuralschema.JSON{Object: "A"},
 				},
 			},
 		}, `["A"]`},
@@ -1035,7 +1039,7 @@ func TestDefaultValues(t *testing.T) {
 				"a": {
 					Generic: structuralschema.Generic{
 						Nullable: true,
-						Default:  structuralschema.JSON{"A"},
+						Default:  structuralschema.JSON{Object: "A"},
 					},
 				},
 			},
@@ -1045,7 +1049,7 @@ func TestDefaultValues(t *testing.T) {
 				"a": {
 					Generic: structuralschema.Generic{
 						Nullable: false,
-						Default:  structuralschema.JSON{"A"},
+						Default:  structuralschema.JSON{Object: "A"},
 					},
 				},
 			},
@@ -1056,7 +1060,7 @@ func TestDefaultValues(t *testing.T) {
 					Structural: &structuralschema.Structural{
 						Generic: structuralschema.Generic{
 							Nullable: true,
-							Default:  structuralschema.JSON{"A"},
+							Default:  structuralschema.JSON{Object: "A"},
 						},
 					},
 				},
@@ -1068,7 +1072,7 @@ func TestDefaultValues(t *testing.T) {
 					Structural: &structuralschema.Structural{
 						Generic: structuralschema.Generic{
 							Nullable: false,
-							Default:  structuralschema.JSON{"A"},
+							Default:  structuralschema.JSON{Object: "A"},
 						},
 					},
 				},

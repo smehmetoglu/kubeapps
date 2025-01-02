@@ -1,7 +1,7 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
-import Alert from "components/js/Alert";
+import AlertGroup from "components/AlertGroup";
 import {
   AvailablePackageDetail,
   AvailablePackageReference,
@@ -13,8 +13,8 @@ import {
   PackageAppVersion,
   ReconciliationOptions,
   VersionReference,
-} from "gen/kubeappsapis/core/packages/v1alpha1/packages";
-import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins";
+} from "gen/kubeappsapis/core/packages/v1alpha1/packages_pb";
+import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins_pb";
 import context from "jest-plugin-context";
 import { defaultStore, mountWrapper } from "shared/specs/mountWrapper";
 import PackageInfo from "./PackageInfo";
@@ -30,18 +30,17 @@ const defaultProps = {
       plugin: { name: "my.plugin", version: "0.0.1" } as Plugin,
     } as AvailablePackageReference,
     currentVersion: { appVersion: "10.0.0", pkgVersion: "1.0.0" } as PackageAppVersion,
-    installedPackageRef: {
+    installedPackageRef: new InstalledPackageReference({
       identifier: "apache/1",
-      pkgVersion: "1.0.0",
       context: { cluster: "", namespace: "package-namespace" } as Context,
       plugin: { name: "my.plugin", version: "0.0.1" } as Plugin,
-    } as InstalledPackageReference,
+    }),
     latestMatchingVersion: { appVersion: "10.0.0", pkgVersion: "1.0.0" } as PackageAppVersion,
     latestVersion: { appVersion: "10.0.0", pkgVersion: "1.0.0" } as PackageAppVersion,
     pkgVersionReference: { version: "1" } as VersionReference,
     status: {
       ready: true,
-      reason: InstalledPackageStatus_StatusReason.STATUS_REASON_INSTALLED,
+      reason: InstalledPackageStatus_StatusReason.INSTALLED,
       userReason: "deployed",
     } as InstalledPackageStatus,
   } as InstalledPackageDetail,
@@ -59,10 +58,13 @@ it("renders an app item", () => {
 
 context("PackageUpdateInfo: when information about updates is available", () => {
   it("renders an up to date message if there are no updates", () => {
-    const appWithoutUpdates = {
+    const appWithoutUpdates = new InstalledPackageDetail({
       ...defaultProps.installedPackageDetail,
-      updateInfo: { upToDate: true },
-    } as InstalledPackageDetail;
+      latestVersion: {
+        pkgVersion: "1.0.0",
+        appVersion: "10.0.0",
+      },
+    });
     const wrapper = mountWrapper(
       defaultStore,
       <PackageInfo {...defaultProps} installedPackageDetail={appWithoutUpdates} />,
@@ -81,7 +83,7 @@ context("PackageUpdateInfo: when information about updates is available", () => 
       defaultStore,
       <PackageInfo {...defaultProps} installedPackageDetail={appWithUpdates} />,
     );
-    expect(wrapper.find(Alert).text()).toContain("A new package version is available: 1.0.1");
+    expect(wrapper.find(AlertGroup).text()).toContain("A new package version is available: 1.0.1");
   });
   it("renders an new version found message if the app latest version is different", () => {
     const appWithUpdates = {
@@ -95,7 +97,7 @@ context("PackageUpdateInfo: when information about updates is available", () => 
       defaultStore,
       <PackageInfo {...defaultProps} installedPackageDetail={appWithUpdates} />,
     );
-    expect(wrapper.find(Alert).text()).toContain("A new app version is available: 10.1.0");
+    expect(wrapper.find(AlertGroup).text()).toContain("A new app version is available: 10.1.0");
   });
   it("renders an new version found message if the app latest version is different without being semver", () => {
     const appWithUpdates = {
@@ -109,7 +111,7 @@ context("PackageUpdateInfo: when information about updates is available", () => 
       defaultStore,
       <PackageInfo {...defaultProps} installedPackageDetail={appWithUpdates} />,
     );
-    expect(wrapper.find(Alert).text()).toContain("A new app version is available: latest");
+    expect(wrapper.find(AlertGroup).text()).toContain("A new app version is available: latest");
   });
   it("renders an new version found message if the pkg latest version is different without being semver", () => {
     const appWithUpdates = {
@@ -123,7 +125,7 @@ context("PackageUpdateInfo: when information about updates is available", () => 
       defaultStore,
       <PackageInfo {...defaultProps} installedPackageDetail={appWithUpdates} />,
     );
-    expect(wrapper.find(Alert).text()).toContain("A new package version is available: latest");
+    expect(wrapper.find(AlertGroup).text()).toContain("A new package version is available: latest");
   });
   it("renders the reconcilliation options if any", () => {
     const appWithUpdates = {

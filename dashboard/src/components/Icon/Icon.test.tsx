@@ -1,7 +1,7 @@
-// Copyright 2020-2022 the Kubeapps contributors.
+// Copyright 2020-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
-import { act } from "react-dom/test-utils";
+import { act } from "@testing-library/react";
 import { defaultStore, mountWrapper } from "shared/specs/mountWrapper";
 import Icon from "./Icon";
 
@@ -12,7 +12,7 @@ it("should render an icon", () => {
 
 it("should use the default icon if not given", () => {
   const wrapper = mountWrapper(defaultStore, <Icon />);
-  expect(wrapper.find("img").prop("src")).toBe("placeholder.png");
+  expect(wrapper.find("img").prop("src")).toBe("placeholder.svg");
 });
 
 it("should fallback to the placeholder if an error happens", () => {
@@ -22,5 +22,5 @@ it("should fallback to the placeholder if an error happens", () => {
     wrapper.find("img").simulate("error", {});
   });
   wrapper.update();
-  expect(wrapper.find("img").prop("src")).toBe("placeholder.png");
+  expect(wrapper.find("img").prop("src")).toBe("placeholder.svg");
 });

@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 .tabs {
+  overflow: auto hidden;
   max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
+  margin-bottom: 1em;
 
   .tab-button {
     &:focus {

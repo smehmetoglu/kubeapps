@@ -1,4 +1,4 @@
-// Copyright 2018-2022 the Kubeapps contributors.
+// Copyright 2018-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import { ThunkAction, ThunkDispatch } from "redux-thunk";
@@ -9,8 +9,8 @@ import { ActionType, deprecated } from "typesafe-actions";
 import {
   ResourceRef as APIResourceRef,
   InstalledPackageReference,
-} from "gen/kubeappsapis/core/packages/v1alpha1/packages";
-import { GetResourcesResponse } from "gen/kubeappsapis/plugins/resources/v1alpha1/resources";
+} from "gen/kubeappsapis/core/packages/v1alpha1/packages_pb";
+import { GetResourcesResponse } from "gen/kubeappsapis/plugins/resources/v1alpha1/resources_pb";
 import actions from "actions";
 import { debounce } from "lodash";
 
@@ -44,16 +44,11 @@ export const requestResources = createAction("REQUEST_RESOURCES", resolve => {
     watch: boolean,
     handler: (r: GetResourcesResponse) => void,
     onError: (e: Event) => void,
-    onComplete: () => void,
-  ) => resolve({ pkg, refs, watch, handler, onError, onComplete });
+  ) => resolve({ pkg, refs, watch, handler, onError });
 });
 
 export const receiveResourcesError = createAction("RECEIVE_RESOURCES_ERROR", resolve => {
   return (err: Error) => resolve(err);
-});
-
-export const closeRequestResources = createAction("CLOSE_REQUEST_RESOURCES", resolve => {
-  return (pkg: InstalledPackageReference) => resolve(pkg);
 });
 
 const allActions = [
@@ -61,13 +56,12 @@ const allActions = [
   receiveResourceError,
   requestResources,
   receiveResourcesError,
-  closeRequestResources,
   requestResourceKinds,
   receiveResourceKinds,
   receiveKindsError,
 ];
 
-export type KubeAction = ActionType<typeof allActions[number]>;
+export type KubeAction = ActionType<(typeof allActions)[number]>;
 
 export function getResourceKinds(
   cluster: string,
@@ -114,15 +108,6 @@ export function getResources(
         },
         (e: any) => {
           dispatch(receiveResourcesError(e));
-        },
-        () => {
-          // The onComplete handler should only dispatch a closeRequestResources
-          // action if this call to `getResources` is for watching. If it is not
-          // watching resources, the server will close the request automatically
-          // (and we have no book-keeping in the redux state).
-          if (watch) {
-            dispatch(closeRequestResources(pkg));
-          }
         },
       ),
     );

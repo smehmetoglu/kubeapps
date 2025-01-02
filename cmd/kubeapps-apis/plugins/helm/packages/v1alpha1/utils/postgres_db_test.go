@@ -4,7 +4,7 @@
 // Currently these tests will be skipped entirely unless the
 // ENABLE_PG_INTEGRATION_TESTS env var is set.
 // Run the local postgres with
-// docker run --publish 5432:5432 -e ALLOW_EMPTY_PASSWORD=yes bitnami/postgresql:14.3.0-debian-11-r3
+// docker run --publish 5432:5432 -e ALLOW_EMPTY_PASSWORD=yes bitnami/postgresql:14.5.0-debian-11-r31
 // in another terminal.
 package utils
 
@@ -74,7 +74,7 @@ func TestGetChart(t *testing.T) {
 			pam, cleanup := getInitializedManager(t)
 			defer cleanup()
 			for namespace, charts := range tc.existingCharts {
-				pgtest.EnsureChartsExist(t, pam, charts, models.Repo{Name: repoName, Namespace: namespace})
+				pgtest.EnsureChartsExist(t, pam, charts, models.AppRepository{Name: repoName, Namespace: namespace})
 			}
 
 			chart, err := pam.GetChart(tc.namespace, tc.chartId)
@@ -159,7 +159,7 @@ func TestGetVersion(t *testing.T) {
 			pam, cleanup := getInitializedManager(t)
 			defer cleanup()
 			for namespace, charts := range tc.existingCharts {
-				pgtest.EnsureChartsExist(t, pam, charts, models.Repo{Name: repoName, Namespace: namespace})
+				pgtest.EnsureChartsExist(t, pam, charts, models.AppRepository{Name: repoName, Namespace: namespace})
 			}
 
 			chart, err := pam.GetChartVersion(tc.namespace, tc.chartId, tc.requestedVersion)
@@ -370,7 +370,7 @@ func TestGetPaginatedChartList(t *testing.T) {
 			defer cleanup()
 			for namespace, chartsPerRepo := range tc.existingCharts {
 				for repo, charts := range chartsPerRepo {
-					pgtest.EnsureChartsExist(t, pam, charts, models.Repo{Name: repo, Namespace: namespace})
+					pgtest.EnsureChartsExist(t, pam, charts, models.AppRepository{Name: repo, Namespace: namespace})
 				}
 			}
 
@@ -489,7 +489,7 @@ func TestGetChartsWithFilters(t *testing.T) {
 			defer cleanup()
 			for namespace, chartsPerRepo := range tc.existingCharts {
 				for repo, charts := range chartsPerRepo {
-					pgtest.EnsureChartsExist(t, pam, charts, models.Repo{Name: repo, Namespace: namespace})
+					pgtest.EnsureChartsExist(t, pam, charts, models.AppRepository{Name: repo, Namespace: namespace})
 				}
 			}
 

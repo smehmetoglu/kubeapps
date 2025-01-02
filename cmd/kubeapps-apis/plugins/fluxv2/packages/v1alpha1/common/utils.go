@@ -1,16 +1,16 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2024 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 package common
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,20 +21,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bufbuild/connect-go"
 	"github.com/docker/cli/cli/config"
 	"github.com/docker/cli/cli/config/credentials"
-	helmv2 "github.com/fluxcd/helm-controller/api/v2beta1"
-	sourcev1 "github.com/fluxcd/source-controller/api/v1beta2"
+	helmv2beta2 "github.com/fluxcd/helm-controller/api/v2beta2"
+	sourcev1beta2 "github.com/fluxcd/source-controller/api/v1beta2"
 	"github.com/go-redis/redis/v8"
+	"github.com/google/go-containerregistry/pkg/authn"
 	plugins "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/plugins/v1alpha1"
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/pkgutils"
 	httpclient "github.com/vmware-tanzu/kubeapps/pkg/http-client"
 	"golang.org/x/net/http/httpproxy"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"helm.sh/helm/v3/pkg/getter"
 	apiv1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -69,27 +68,25 @@ func init() {
 	}
 
 	repositoriesGvr = schema.GroupVersionResource{
-		Group:    sourcev1.GroupVersion.Group,
-		Version:  sourcev1.GroupVersion.Version,
+		Group:    sourcev1beta2.GroupVersion.Group,
+		Version:  sourcev1beta2.GroupVersion.Version,
 		Resource: "helmrepositories",
 	}
 
 	chartsGvr = schema.GroupVersionResource{
-		Group:    sourcev1.GroupVersion.Group,
-		Version:  sourcev1.GroupVersion.Version,
+		Group:    sourcev1beta2.GroupVersion.Group,
+		Version:  sourcev1beta2.GroupVersion.Version,
 		Resource: "helmcharts",
 	}
 
 	releasesGvr = schema.GroupVersionResource{
-		Group:    helmv2.GroupVersion.Group,
-		Version:  helmv2.GroupVersion.Version,
+		Group:    helmv2beta2.GroupVersion.Group,
+		Version:  helmv2beta2.GroupVersion.Version,
 		Resource: "helmreleases",
 	}
 }
 
-//
 // miscellaneous utility funcs
-//
 func NewDefaultPluginConfig() *FluxPluginConfig {
 	// If no config is provided, we default to the existing values for backwards
 	// compatibility.
@@ -97,7 +94,7 @@ func NewDefaultPluginConfig() *FluxPluginConfig {
 		VersionsInSummary:    pkgutils.GetDefaultVersionsInSummary(),
 		TimeoutSeconds:       int32(-1),
 		DefaultUpgradePolicy: pkgutils.UpgradePolicyNone,
-		UserManagedSecrets:   false,
+		NoCrossNamespaceRefs: false,
 	}
 }
 
@@ -109,6 +106,18 @@ func PrettyPrint(o interface{}) string {
 	return string(prettyBytes)
 }
 
+func PreferObjectName(o interface{}) string {
+	if o == nil {
+		return "<nil>"
+	} else if obj, ok := o.(ctrlclient.Object); ok {
+		name := obj.GetName()
+		namespace := obj.GetNamespace()
+		return fmt.Sprintf("%s/%s", namespace, name)
+	} else {
+		return PrettyPrint(o)
+	}
+}
+
 func NamespacedName(obj ctrlclient.Object) (*types.NamespacedName, error) {
 	name := obj.GetName()
 	namespace := obj.GetNamespace()
@@ -116,31 +125,9 @@ func NamespacedName(obj ctrlclient.Object) (*types.NamespacedName, error) {
 		return &types.NamespacedName{Name: name, Namespace: namespace}, nil
 	} else {
 		return nil,
-			status.Errorf(codes.Internal,
-				"required fields 'metadata.name' and/or 'metadata.namespace' not found on resource: %v",
-				PrettyPrint(obj))
-	}
-}
-
-// "Local" in the sense of no namespace is specified
-func NewLocalOpaqueSecret(ownerRepo types.NamespacedName) *apiv1.Secret {
-	return &apiv1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: ownerRepo.Name + "-",
-		},
-		Type: apiv1.SecretTypeOpaque,
-		Data: map[string][]byte{},
-	}
-}
-
-// "Local" in the sense of no namespace is specified
-func NewLocalDockerConfigJsonSecret(ownerRepo types.NamespacedName) *apiv1.Secret {
-	return &apiv1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: ownerRepo.Name + "-",
-		},
-		Type: apiv1.SecretTypeDockerConfigJson,
-		Data: map[string][]byte{},
+			connect.NewError(connect.CodeInternal,
+				fmt.Errorf("required fields 'metadata.name' and/or 'metadata.namespace' not found on resource: %v",
+					PrettyPrint(obj)))
 	}
 }
 
@@ -161,8 +148,12 @@ func RWMutexWriteLocked(rw *sync.RWMutex) bool {
 // the readerCount may become < 0.
 // see https://github.com/golang/go/blob/release-branch.go1.14/src/sync/rwmutex.go#L100
 // so this code definitely needs be used with caution or better avoided
+// TODO(minelson): Note the danger of checking private variables like this
+// is that they change underneath you. This fails with go 1.20 because
+// readerCount has changed from an Int to an atomic.Int32 (struct).
+// Updated to 1.20, but warning is still applicable.
 func RWMutexReadLocked(rw *sync.RWMutex) bool {
-	return reflect.ValueOf(rw).Elem().FieldByName("readerCount").Int() > 0
+	return reflect.ValueOf(rw).Elem().FieldByName("readerCount").FieldByName("v").Int() > 0
 }
 
 // https://github.com/vmware-tanzu/kubeapps/pull/3044#discussion_r662733334
@@ -190,23 +181,22 @@ func NewRedisClientFromEnv(stopCh <-chan struct{}) (*redis.Client, error) {
 
 	// ref https://github.com/vmware-tanzu/kubeapps/pull/4382#discussion_r820386531
 	var redisCli *redis.Client
-	err = wait.PollImmediate(redisInitClientRetryWait, redisInitClientTimeout,
-		func() (bool, error) {
-			redisCli = redis.NewClient(&redis.Options{
-				Addr:     REDIS_ADDR,
-				Password: REDIS_PASSWORD,
-				DB:       REDIS_DB_NUM,
-			})
-
-			// ping redis to make sure client is connected
-			var pong string
-			if pong, err = redisCli.Ping(redisCli.Context()).Result(); err == nil {
-				log.Infof("Redis [PING]: %s", pong)
-				return true, nil
-			}
-			log.Infof("Waiting %s before retrying to due to %v...", redisInitClientRetryWait.String(), err)
-			return false, nil
+	err = wait.PollUntilContextTimeout(context.Background(), redisInitClientRetryWait, redisInitClientTimeout, true, func(ctx context.Context) (bool, error) {
+		redisCli = redis.NewClient(&redis.Options{
+			Addr:     REDIS_ADDR,
+			Password: REDIS_PASSWORD,
+			DB:       REDIS_DB_NUM,
 		})
+
+		// ping redis to make sure client is connected
+		var pong string
+		if pong, err = redisCli.Ping(redisCli.Context()).Result(); err == nil {
+			log.Infof("Redis [PING]: %s", pong)
+			return true, nil
+		}
+		log.Infof("Waiting %s before retrying to due to %v...", redisInitClientRetryWait.String(), err)
+		return false, nil
+	})
 
 	if err != nil {
 		return nil, fmt.Errorf("initializing redis client failed after timeout of %s was reached, error: %v", redisInitClientTimeout.String(), err)
@@ -281,7 +271,6 @@ func HelmGetterOptionsFromSecret(secret apiv1.Secret) ([]getter.Option, error) {
 	}
 }
 
-//
 // Secrets with no username AND password are ignored, if only one is defined it
 // returns an error.
 func basicAuthFromSecret(secret apiv1.Secret, options *HttpClientOptions) error {
@@ -315,27 +304,26 @@ func tlsClientConfigFromSecret(secret apiv1.Secret, options *HttpClientOptions) 
 	return nil
 }
 
-// OCIRegistryCredentialFromSecret derives authentication data from a Secret to login to an OCI registry.
+// OCIChartRepositoryCredentialFromSecret derives authentication data from a Secret to login to an OCI registry.
 // This Secret may either hold "username" and "password" fields or be of the
 // apiv1.SecretTypeDockerConfigJson type and hold a apiv1.DockerConfigJsonKey field with a
-// complete Docker configuration. If both, "username" and "password" are
-// empty, a nil LoginOption and a nil error will be returned.
+// complete Docker configuration. If both, "username" and "password" are empty, a nil error will be returned.
 // ref https://github.com/fluxcd/source-controller/blob/main/internal/helm/registry/auth.go
-func OCIRegistryCredentialFromSecret(registryURL string, secret apiv1.Secret) (*orasregistryauthv2.Credential, error) {
+func OCIChartRepositoryCredentialFromSecret(registryURL string, secret apiv1.Secret) (*orasregistryauthv2.Credential, error) {
 	var username, password string
 	if secret.Type == apiv1.SecretTypeDockerConfigJson {
 		dockerCfg, err := config.LoadFromReader(bytes.NewReader(secret.Data[apiv1.DockerConfigJsonKey]))
 		if err != nil {
-			return nil, fmt.Errorf("unable to load Docker config from Secret '%s': %w", secret.Name, err)
+			return nil, fmt.Errorf("unable to load docker config from secret '%s': %w", secret.Name, err)
 		}
 		parsedURL, err := url.Parse(registryURL)
 		if err != nil {
-			return nil, fmt.Errorf("unable to parse registry URL '%s' while reconciling Secret '%s': %w",
+			return nil, fmt.Errorf("unable to parse registry URL '%s' while reconciling secret '%s': %w",
 				registryURL, secret.Name, err)
 		}
 		authConfig, err := dockerCfg.GetAuthConfig(parsedURL.Host)
 		if err != nil {
-			return nil, fmt.Errorf("unable to get authentication data from Secret '%s': %w", secret.Name, err)
+			return nil, fmt.Errorf("unable to get authentication data from secret '%s': %w", secret.Name, err)
 		}
 
 		// Make sure that the obtained auth config is for the requested host.
@@ -343,7 +331,7 @@ func OCIRegistryCredentialFromSecret(registryURL string, secret apiv1.Secret) (*
 		// the credential store returns an empty auth config.
 		// Refer: https://github.com/docker/cli/blob/v20.10.16/cli/config/credentials/file_store.go#L44
 		if credentials.ConvertToHostname(authConfig.ServerAddress) != parsedURL.Host {
-			return nil, fmt.Errorf("no auth config for '%s' in the docker-registry Secret '%s'", parsedURL.Host, secret.Name)
+			return nil, fmt.Errorf("no auth config for '%s' in the docker-registry secret '%s'", parsedURL.Host, secret.Name)
 		}
 		username = authConfig.Username
 		password = authConfig.Password
@@ -356,11 +344,34 @@ func OCIRegistryCredentialFromSecret(registryURL string, secret apiv1.Secret) (*
 	case username == "" || password == "":
 		return nil, fmt.Errorf("invalid '%s' secret data: required fields 'username' and 'password'", secret.Name)
 	}
-	pwdRedacted := password
-	if len(pwdRedacted) > 4 {
-		pwdRedacted = pwdRedacted[0:3] + "..."
+
+	return &orasregistryauthv2.Credential{
+		Username: username,
+		Password: password,
+	}, nil
+}
+
+// OIDCAdaptHelper returns an ORAS credentials callback configured with the authorization data
+// from the given authn authenticator. This allows for example to make use of credential helpers from
+// cloud providers.
+// Ref: https://github.com/google/go-containerregistry/tree/main/pkg/authn
+func OIDCAdaptHelper(authenticator authn.Authenticator) (*orasregistryauthv2.Credential, error) {
+
+	authConfig, err := authenticator.Authorization()
+	if err != nil {
+		return nil, fmt.Errorf("unable to get authentication data from OIDC: %w", err)
 	}
-	log.Infof("-OCIRegistryCredentialFromSecret: username: [%s], password: [%s]", username, pwdRedacted)
+
+	username := authConfig.Username
+	password := authConfig.Password
+
+	switch {
+	case username == "" && password == "":
+		return nil, nil
+	case username == "" || password == "":
+		return nil, fmt.Errorf("invalid auth data: required fields 'username' and 'password'")
+	}
+
 	return &orasregistryauthv2.Credential{
 		Username: username,
 		Password: password,
@@ -368,8 +379,6 @@ func OCIRegistryCredentialFromSecret(registryURL string, secret apiv1.Secret) (*
 }
 
 func NewHttpClientAndHeaders(clientOptions *HttpClientOptions) (*http.Client, map[string]string, error) {
-	// I wish I could reuse the code in pkg/chart/chart.go and pkg/kube_utils/kube_utils.go
-	// InitHTTPClient(), etc. but alas, it's all built around AppRepository CRD, which I don't have.
 	headers := make(map[string]string)
 	headers["User-Agent"] = UserAgentString()
 	if clientOptions != nil {
@@ -420,10 +429,8 @@ type FluxPluginConfig struct {
 	VersionsInSummary    pkgutils.VersionsInSummary
 	TimeoutSeconds       int32
 	DefaultUpgradePolicy pkgutils.UpgradePolicy
-	// whether or not secrets are fully managed by user or kubeapps
-	// see comments in design spec under AddPackageRepository.
-	// false (i.e. kubeapps manages secrets) by default
-	UserManagedSecrets bool
+	// ref https://github.com/vmware-tanzu/kubeapps/issues/5541
+	NoCrossNamespaceRefs bool
 }
 
 // ParsePluginConfig parses the input plugin configuration json file and return the
@@ -446,7 +453,7 @@ func ParsePluginConfig(pluginConfigPath string) (*FluxPluginConfig, error) {
 			Packages struct {
 				V1alpha1 struct {
 					DefaultUpgradePolicy string `json:"defaultUpgradePolicy"`
-					UserManagedSecrets   bool   `json:"userManagedSecrets"`
+					NoCrossNamespaceRefs bool   `json:"noCrossNamespaceRefs"`
 				} `json:"v1alpha1"`
 			} `json:"packages"`
 		} `json:"flux"`
@@ -454,7 +461,7 @@ func ParsePluginConfig(pluginConfigPath string) (*FluxPluginConfig, error) {
 	var config internalFluxPluginConfig
 
 	// #nosec G304
-	pluginConfig, err := ioutil.ReadFile(pluginConfigPath)
+	pluginConfig, err := os.ReadFile(pluginConfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("unable to open plugin config at %q: %w", pluginConfigPath, err)
 	}
@@ -472,7 +479,7 @@ func ParsePluginConfig(pluginConfigPath string) (*FluxPluginConfig, error) {
 			VersionsInSummary:    config.Core.Packages.V1alpha1.VersionsInSummary,
 			TimeoutSeconds:       config.Core.Packages.V1alpha1.TimeoutSeconds,
 			DefaultUpgradePolicy: defaultUpgradePolicy,
-			UserManagedSecrets:   config.Flux.Packages.V1alpha1.UserManagedSecrets,
+			NoCrossNamespaceRefs: config.Flux.Packages.V1alpha1.NoCrossNamespaceRefs,
 		}, nil
 	}
 }

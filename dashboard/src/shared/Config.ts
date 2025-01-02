@@ -1,8 +1,10 @@
-// Copyright 2018-2022 the Kubeapps contributors.
+// Copyright 2018-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import axios from "axios";
+import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins_pb";
 import * as url from "shared/url";
+import { PackageRepositoriesService } from "./PackageRepositoriesService";
 
 export enum SupportedThemes {
   dark = "dark",
@@ -19,7 +21,9 @@ export interface ICustomAppViewIdentifier {
 export interface IConfig {
   kubeappsCluster: string;
   kubeappsNamespace: string;
-  globalReposNamespace: string;
+  helmGlobalNamespace: string;
+  // TODO(castelblanque) Global namespaces should be well organized by plugin, or come from plugins API
+  carvelGlobalNamespace: string;
   appVersion: string;
   authProxyEnabled: boolean;
   oauthLoginURI: string;
@@ -32,10 +36,13 @@ export interface IConfig {
   remoteComponentsUrl: string;
   customAppViews: ICustomAppViewIdentifier[];
   skipAvailablePackageDetails: boolean;
+  createNamespaceLabels: { [key: string]: string };
+  configuredPlugins: Plugin[];
 }
 
 export interface IFeatureFlags {
   operators: boolean;
+  schemaEditor: { enabled: boolean };
 }
 
 export default class Config {
@@ -44,18 +51,26 @@ export default class Config {
     return data;
   }
 
+  public static async getConfiguredPlugins() {
+    const { plugins } = await PackageRepositoriesService.getConfiguredPlugins();
+    return plugins;
+  }
+
   // getTheme retrieves the different theme preferences and calculates which one is chosen
   public static getTheme(config: IConfig): SupportedThemes {
-    // Define a ballback theme in case of errors
+    // Define a fallback theme in case of errors
     const fallbackTheme = SupportedThemes.light;
 
     // Retrieve the system theme preference (configurable via Values.dashboard.defaultTheme)
-    const systemTheme = config.theme != null ? SupportedThemes[config.theme] : undefined;
+    const systemTheme =
+      config.theme != null
+        ? SupportedThemes[config.theme as keyof typeof SupportedThemes]
+        : undefined;
 
     // Retrieve the user theme preference
     const userTheme =
       localStorage.getItem("user-theme") != null
-        ? SupportedThemes[localStorage.getItem("user-theme") as string]
+        ? SupportedThemes[localStorage.getItem("user-theme") as keyof typeof SupportedThemes]
         : undefined;
 
     // Retrieve the browser theme preference
@@ -79,7 +94,7 @@ export default class Config {
   // setUserTheme changes the current theme and also stores the user's preference in the localStorage
   // it's a separate function for testing
   public static setUserTheme(theme: SupportedThemes) {
-    this.setTheme(theme);
+    Config.setTheme(theme);
     localStorage.setItem("user-theme", theme);
   }
 }

@@ -1,4 +1,4 @@
-// Copyright 2018-2022 the Kubeapps contributors.
+// Copyright 2018-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import { JSONSchemaType } from "ajv";
@@ -11,7 +11,7 @@ import {
   InstalledPackageSummary,
   ReconciliationOptions,
   VersionReference,
-} from "gen/kubeappsapis/core/packages/v1alpha1/packages";
+} from "gen/kubeappsapis/core/packages/v1alpha1/packages_pb";
 import { ThunkAction } from "redux-thunk";
 import PackagesService from "shared/PackagesService";
 import {
@@ -21,13 +21,14 @@ import {
   FetchWarning,
   IStoreState,
   RollbackError,
-  UnprocessableEntity,
+  UnprocessableEntityError,
   UpgradeError,
 } from "shared/types";
 import { getPluginsSupportingRollback } from "shared/utils";
 import { ActionType, deprecated } from "typesafe-actions";
 import { InstalledPackage } from "../shared/InstalledPackage";
-import { validate } from "../shared/schema";
+import { validateSchema, validateValuesSchema } from "../shared/schema";
+import { handleErrorAction } from "./auth";
 
 const { createAction } = deprecated;
 
@@ -104,7 +105,7 @@ const allActions = [
   selectInstalledPackage,
 ];
 
-export type InstalledPackagesAction = ActionType<typeof allActions[number]>;
+export type InstalledPackagesAction = ActionType<(typeof allActions)[number]>;
 
 export function getInstalledPackage(
   installedPackageRef?: InstalledPackageReference,
@@ -113,9 +114,8 @@ export function getInstalledPackage(
     dispatch(requestInstalledPackage());
     try {
       // Get the details of an installed package
-      const { installedPackageDetail } = await InstalledPackage.GetInstalledPackageDetail(
-        installedPackageRef,
-      );
+      const { installedPackageDetail } =
+        await InstalledPackage.GetInstalledPackageDetail(installedPackageRef);
 
       // For local packages with no references to any available packages (eg.a local package for development)
       // we aren't able to get the details, but still want to display the available data so far
@@ -129,16 +129,24 @@ export function getInstalledPackage(
         availablePackageDetail = resp.availablePackageDetail;
       } catch (e: any) {
         dispatch(
-          errorInstalledPackage(
-            new FetchWarning(
-              "this package has missing information, some actions might not be available.",
+          handleErrorAction(
+            e,
+            errorInstalledPackage(
+              new FetchWarning(
+                "this package has missing information, some actions might not be available.",
+              ),
             ),
           ),
         );
       }
       dispatch(selectInstalledPackage(installedPackageDetail!, availablePackageDetail));
     } catch (e: any) {
-      dispatch(errorInstalledPackage(new FetchError("Unable to get installed package", [e])));
+      dispatch(
+        handleErrorAction(
+          e,
+          errorInstalledPackage(new FetchError("Unable to get installed package", [e])),
+        ),
+      );
     }
   };
 }
@@ -150,12 +158,16 @@ export function getInstalledPkgStatus(
     dispatch(requestInstalledPackageStatus());
     try {
       // Get the details of an installed package for the status.
-      const { installedPackageDetail } = await InstalledPackage.GetInstalledPackageDetail(
-        installedPackageRef,
-      );
+      const { installedPackageDetail } =
+        await InstalledPackage.GetInstalledPackageDetail(installedPackageRef);
       dispatch(receiveInstalledPackageStatus(installedPackageDetail!.status!));
     } catch (e: any) {
-      dispatch(errorInstalledPackage(new FetchError("Unable to refresh installed package", [e])));
+      dispatch(
+        handleErrorAction(
+          e,
+          errorInstalledPackage(new FetchError("Unable to refresh installed package", [e])),
+        ),
+      );
     }
   };
 }
@@ -170,7 +182,7 @@ export function deleteInstalledPackage(
       dispatch(receiveDeleteInstalledPackage());
       return true;
     } catch (e: any) {
-      dispatch(errorInstalledPackage(new DeleteError(e.message)));
+      dispatch(handleErrorAction(e, errorInstalledPackage(new DeleteError(e.message))));
       return false;
     }
   };
@@ -191,7 +203,9 @@ export function fetchInstalledPackages(
       dispatch(receiveInstalledPackageList(installedPackageSummaries));
       return installedPackageSummaries;
     } catch (e: any) {
-      dispatch(errorInstalledPackage(new FetchError("Unable to list apps", [e])));
+      dispatch(
+        handleErrorAction(e, errorInstalledPackage(new FetchError("Unable to list apps", [e]))),
+      );
       return [];
     }
   };
@@ -210,12 +224,25 @@ export function installPackage(
     dispatch(requestInstallPackage());
     try {
       if (values && schema) {
-        const validation = validate(values, schema);
+        const schemaValidation = validateSchema(schema);
+        if (!schemaValidation.valid) {
+          const errorText = schemaValidation?.errors
+            ?.map(e => `  - ${e.instancePath}: ${e.message}`)
+            .join("\n");
+          throw new UnprocessableEntityError(
+            `The schema for this package is not valid. Please contact the package author. The following errors were found:\n${errorText}`,
+          );
+        }
+        const validation = validateValuesSchema(
+          values,
+          schema,
+          availablePackageDetail.defaultValues,
+        );
         if (!validation.valid) {
-          const errorText =
-            validation.errors &&
-            validation.errors.map(e => `  - ${e.instancePath}: ${e.message}`).join("\n");
-          throw new UnprocessableEntity(
+          const errorText = validation?.errors
+            ?.map(e => `  - ${e.instancePath}: ${e.message}`)
+            .join("\n");
+          throw new UnprocessableEntityError(
             `The given values don't match the required format. The following errors were found:\n${errorText}`,
           );
         }
@@ -243,7 +270,7 @@ export function installPackage(
         return false;
       }
     } catch (e: any) {
-      dispatch(errorInstalledPackage(new CreateError(e.message)));
+      dispatch(handleErrorAction(e, errorInstalledPackage(new CreateError(e.message))));
       return false;
     }
   };
@@ -259,12 +286,25 @@ export function updateInstalledPackage(
     dispatch(requestUpdateInstalledPackage());
     try {
       if (values && schema) {
-        const validation = validate(values, schema);
+        const schemaValidation = validateSchema(schema);
+        if (!schemaValidation.valid) {
+          const errorText = schemaValidation?.errors
+            ?.map(e => `  - ${e.instancePath}: ${e.message}`)
+            .join("\n");
+          throw new UnprocessableEntityError(
+            `The schema for this package is not valid. Please contact the package author. The following errors were found:\n${errorText}`,
+          );
+        }
+        const validation = validateValuesSchema(
+          values,
+          schema,
+          availablePackageDetail.defaultValues,
+        );
         if (!validation.valid) {
-          const errorText =
-            validation.errors &&
-            validation.errors.map(e => `  - ${e.instancePath}: ${e.message}`).join("\n");
-          throw new UnprocessableEntity(
+          const errorText = validation?.errors
+            ?.map(e => `  - ${e.instancePath}: ${e.message}`)
+            .join("\n");
+          throw new UnprocessableEntityError(
             `The given values don't match the required format. The following errors were found:\n${errorText}`,
           );
         }
@@ -286,7 +326,7 @@ export function updateInstalledPackage(
         return false;
       }
     } catch (e: any) {
-      dispatch(errorInstalledPackage(new UpgradeError(e.message)));
+      dispatch(handleErrorAction(e, errorInstalledPackage(new UpgradeError(e.message))));
       return false;
     }
   };
@@ -309,7 +349,7 @@ export function rollbackInstalledPackage(
         dispatch(getInstalledPackage(installedPackageRef));
         return true;
       } catch (e: any) {
-        dispatch(errorInstalledPackage(new RollbackError(e.message)));
+        dispatch(handleErrorAction(e, errorInstalledPackage(new RollbackError(e.message))));
         return false;
       }
     } else {

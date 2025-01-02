@@ -1,65 +1,58 @@
-// Copyright 2018-2022 the Kubeapps contributors.
+// Copyright 2018-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import {
   AvailablePackageDetail,
-  InstalledPackageDetail,
-  InstalledPackageSummary,
+  Context,
   GetInstalledPackageSummariesResponse,
+  InstalledPackageDetail,
   InstalledPackageReference,
   InstalledPackageStatus,
-  VersionReference,
-  ReconciliationOptions,
   InstalledPackageStatus_StatusReason,
-} from "gen/kubeappsapis/core/packages/v1alpha1/packages";
-import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins";
-import configureMockStore from "redux-mock-store";
-import thunk from "redux-thunk";
+  InstalledPackageSummary,
+  ReconciliationOptions,
+  VersionReference,
+} from "gen/kubeappsapis/core/packages/v1alpha1/packages_pb";
+import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins_pb";
 import { InstalledPackage } from "shared/InstalledPackage";
-import { IInstalledPackageState, UnprocessableEntity, UpgradeError } from "shared/types";
-import { PluginNames } from "shared/utils";
+import { getStore, initialState } from "shared/specs/mountWrapper";
+import { IStoreState, PluginNames, UnprocessableEntityError, UpgradeError } from "shared/types";
 import { getType } from "typesafe-actions";
 import actions from ".";
-
-const mockStore = configureMockStore([thunk]);
 
 let store: any;
 
 beforeEach(() => {
-  const state: IInstalledPackageState = {
-    isFetching: false,
-    items: [],
-  };
-  store = mockStore({
+  store = getStore({
     apps: {
-      state,
+      ...initialState.apps,
+      isFetching: false,
+      items: [],
     },
     config: {
+      ...initialState.config,
       namespace: "kubeapps-ns",
     },
-  });
+  } as Partial<IStoreState>);
 });
 
 describe("fetches installed packages", () => {
-  const validInstalledPackageSummary: InstalledPackageSummary = {
-    installedPackageRef: {
-      context: { cluster: "second-cluster", namespace: "my-ns" },
+  const validInstalledPackageSummary = new InstalledPackageSummary({
+    installedPackageRef: new InstalledPackageReference({
+      context: new Context({ cluster: "second-cluster", namespace: "my-ns" }),
       identifier: "some-name",
-    },
+    }),
     iconUrl: "",
     name: "foo",
     pkgDisplayName: "foo",
     shortDescription: "some description",
-  };
+  });
   let requestInstalledPackageListMock: jest.Mock;
   const installedPackageSummaries: InstalledPackageSummary[] = [validInstalledPackageSummary];
   beforeEach(() => {
-    requestInstalledPackageListMock = jest.fn(
-      () =>
-        ({
-          installedPackageSummaries,
-        } as GetInstalledPackageSummariesResponse),
-    );
+    requestInstalledPackageListMock = jest.fn(() => {
+      return { installedPackageSummaries } as GetInstalledPackageSummariesResponse;
+    });
     InstalledPackage.GetInstalledPackageSummaries = requestInstalledPackageListMock;
   });
   afterEach(() => {
@@ -235,7 +228,7 @@ describe("deploy package", () => {
       { type: getType(actions.installedpackages.requestInstallPackage) },
       {
         type: getType(actions.installedpackages.errorInstalledPackage),
-        payload: new UnprocessableEntity(
+        payload: new UnprocessableEntityError(
           "The given values don't match the required format. The following errors were found:\n  - /foo: must be string",
         ),
       },
@@ -314,7 +307,7 @@ describe("updateInstalledPackage", () => {
       { type: getType(actions.installedpackages.requestUpdateInstalledPackage) },
       {
         type: getType(actions.installedpackages.errorInstalledPackage),
-        payload: new UnprocessableEntity(
+        payload: new UnprocessableEntityError(
           "The given values don't match the required format. The following errors were found:\n  - /foo: must be string",
         ),
       },
@@ -334,16 +327,16 @@ describe("rollbackInstalledPackage", () => {
   );
 
   it("success and re-request apps info", async () => {
-    const installedPackageDetail = {
+    const installedPackageDetail = new InstalledPackageDetail({
       availablePackageRef: {
         context: { cluster: "default", namespace: "my-ns" },
         identifier: "test",
         plugin: { name: PluginNames.PACKAGES_HELM, version: "0.0.1" } as Plugin,
       },
       currentVersion: { appVersion: "4.5.6", pkgVersion: "1.2.3" },
-    } as InstalledPackageDetail;
+    });
 
-    const availablePackageDetail = { name: "test" } as AvailablePackageDetail;
+    const availablePackageDetail = new AvailablePackageDetail({ name: "test" });
 
     InstalledPackage.RollbackInstalledPackage = jest.fn().mockImplementationOnce(() => true);
     InstalledPackage.GetInstalledPackageDetail = jest.fn().mockReturnValue({
@@ -353,7 +346,7 @@ describe("rollbackInstalledPackage", () => {
     expect(res).toBe(true);
 
     const selectCMD = actions.installedpackages.selectInstalledPackage(
-      installedPackageDetail as any,
+      installedPackageDetail,
       availablePackageDetail,
     );
     const res2 = await store.dispatch(selectCMD);
@@ -411,7 +404,7 @@ describe("getInstalledPkgStatus", () => {
       plugin: { name: "bad-plugin", version: "0.0.1" } as Plugin,
     } as InstalledPackageReference;
     const status = {
-      reason: InstalledPackageStatus_StatusReason.STATUS_REASON_INSTALLED,
+      reason: InstalledPackageStatus_StatusReason.INSTALLED,
     } as InstalledPackageStatus;
     const installedPackageDetail = { status } as InstalledPackageDetail;
     InstalledPackage.GetInstalledPackageDetail = jest.fn().mockReturnValue({

@@ -4,9 +4,13 @@ The Kubeapps APIs service provides a pluggable, gRPC-based API service enabling 
 
 The Kubeapps APIs service is bundled with three packaging plugins providing support for the Helm, Carvel and Flux packaging formats, enabling users to browse and install packages of different formats.
 
+<!-- TODO(agamez): piece of docs requiring update. Reason: screenshots using old Kubeapps logo -->
+
 ![Kubeapps with packaging plugins](../../img/kubeapps-apis/packages-plugins.png)
 
 In addition to these three packaging plugins, the Kubeapps APIs service is also bundled with a Kubernetes resources plugin that removes the long-standing requirement for the Kubeapps UI to talk directly with the Kubernetes API server. With this change, a user with the required RBAC can request, for example, Kubernetes resources for a specific installed package only:
+
+<!-- TODO(agamez): piece of docs requiring update. Reason: screenshots using old Kubeapps logo -->
 
 ![Kubeapps with resources plugins](../../img/kubeapps-apis/resources-plugin.png)
 
@@ -17,8 +21,8 @@ In addition to these three packaging plugins, the Kubeapps APIs service is also 
 We chose to use [gRPC/protobuf](https://grpc.io/) to manage our API definitions and implementations together with the [buf.build](https://buf.build/) tool for lint and other niceties. In that regard, it's a pretty standard stack using:
 
 - [grpc-gateway](https://grpc-ecosystem.github.io/grpc-gateway/) to enable a RESTful JSON version of our API (we don't use this in our client, but not everyone uses gRPC either, so we want to ensure the API is accessible to others who would like to use it)
-- Improbable's [grpc-web](https://github.com/improbable-eng/grpc-web) to enable TypeScript gRPC client generation as well as translating gRPC-web requests into plain gRPC calls in the backend (rather than requiring something heavier like [Envoy](https://grpc.io/docs/platforms/web/basics/#configure-the-envoy-proxy) to do the translation),
-- We multiplex on a single port to serve gRPC, gRPC-web as well as JSON HTTP requests.
+- [Connect grpc-web](https://connect.build/docs/web/getting-started) to enable TypeScript gRPC client generation as well as translating gRPC-web requests into plain gRPC calls in the backend (rather than requiring something heavier like [Envoy](https://grpc.io/docs/platforms/web/basics/#configure-the-envoy-proxy) to do the translation),
+- Connect multiplexes on a single port to serve gRPC, gRPC-web, and we multiplex the Gateway JSON HTTP requests on the same port.
 
 ### A pluggable API server - loading plugins dynamically
 
@@ -330,7 +334,7 @@ $ grpcurl -plaintext -d '{"available_package_ref": {"context": {"cluster": "defa
       "appVersion": "2.4.52"
     },
     "repoUrl": "https://charts.bitnami.com/bitnami",
-    "homeUrl": "https://github.com/bitnami/charts/tree/master/bitnami/apache",
+    "homeUrl": "https://github.com/bitnami/charts/tree/main/bitnami/apache",
     "iconUrl": "https://bitnami.com/assets/stacks/apache/img/apache-stack-220x234.png",
     "displayName": "apache",
     "shortDescription": "Apache HTTP Server is an open-source HTTP server. The goal of this project is to provide a secure, efficient and extensible server that provides HTTP services in sync with the current HTTP standards.",

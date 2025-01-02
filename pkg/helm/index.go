@@ -1,4 +1,4 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 package helm
@@ -27,9 +27,12 @@ func parseRepoIndex(contents []byte) (*repo.IndexFile, error) {
 
 // Takes an entry from the index and constructs a model representation of the
 // object.
-func newChart(entry repo.ChartVersions, r *models.Repo, shallow bool) models.Chart {
+func newChart(entry repo.ChartVersions, r *models.AppRepository, shallow bool) models.Chart {
 	var c models.Chart
 	err := copier.Copy(&c, entry[0])
+	if err != nil {
+		return models.Chart{}
+	}
 	if shallow {
 		err = copier.Copy(&c.ChartVersions, []repo.ChartVersion{*entry[0]})
 	} else {
@@ -45,12 +48,10 @@ func newChart(entry repo.ChartVersions, r *models.Repo, shallow bool) models.Cha
 	return c
 }
 
-//
 // ChartsFromIndex receives an array of bytes containing the contents of index.yaml from a helm repo and returns
 // all Chart models from that index. The shallow flag controls whether only the latest version of the charts is returned
 // or all versions
-//
-func ChartsFromIndex(contents []byte, r *models.Repo, shallow bool) ([]models.Chart, error) {
+func ChartsFromIndex(contents []byte, r *models.AppRepository, shallow bool) ([]models.Chart, error) {
 	var charts []models.Chart
 	index, err := parseRepoIndex(contents)
 	if err != nil {
@@ -58,7 +59,7 @@ func ChartsFromIndex(contents []byte, r *models.Repo, shallow bool) ([]models.Ch
 	}
 	for key, entry := range index.Entries {
 		// note that 'entry' itself is an array of chart versions
-		// after index.SortEntires() call, it looks like there is only one entry per package,
+		// after index.SortEntries() call, it looks like there is only one entry per package,
 		// and entry[0] should be the most recent chart version, e.g. Name: "mariadb" Version: "9.3.12"
 		// while the rest of the elements in the entry array keep track of previous chart versions, e.g.
 		// "mariadb" version "9.3.11", "9.3.10", etc. For entry "mariadb", bitnami catalog has
@@ -68,12 +69,12 @@ func ChartsFromIndex(contents []byte, r *models.Repo, shallow bool) ([]models.Ch
 
 		// skip if the entry is empty
 		if len(entry) < 1 {
-			log.Infof("skipping chart: [%s]", key)
+			log.Infof("Skipping chart: [%s]", key)
 			continue
 		}
 
 		if entry[0].Deprecated {
-			log.Infof("skipping deprecated chart: [%s]", entry[0].Name)
+			log.Infof("Skipping deprecated chart: [%s]", entry[0].Name)
 			continue
 		}
 		charts = append(charts, newChart(entry, r, shallow))

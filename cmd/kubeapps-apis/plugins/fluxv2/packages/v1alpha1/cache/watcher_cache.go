@@ -1,4 +1,4 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2024 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 package cache
@@ -8,16 +8,14 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/bufbuild/connect-go"
 	"github.com/go-redis/redis/v8"
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/fluxv2/packages/v1alpha1/common"
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/clientgetter"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	apiv1 "k8s.io/api/core/v1"
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -81,7 +79,7 @@ type NamespacedResourceWatcherCache struct {
 	// significant in that it flushes the whole redis cache and re-populates the state from k8s.
 	// When that happens we don't really want any concurrent access to the cache until the resync()
 	// operation is complete. In other words, we want to:
-	//  - be able to have multiple concurrent readers (goroutines doing GetForOne()/GetForMultiple())
+	//  - be able to have multiple concurrent readers (goroutines doing Get()/GetMultiple())
 	//  - only a single writer (goroutine doing a resync()) is allowed, and while its doing its job
 	//    no readers are allowed
 	resyncCond *sync.Cond
@@ -104,7 +102,7 @@ type NamespacedResourceWatcherCacheConfig struct {
 	Gvr schema.GroupVersionResource
 	// this ClientGetter is for running out-of-request interactions with the Kubernetes API server,
 	// such as watching for resource changes
-	ClientGetter clientgetter.BackgroundClientGetterFunc
+	ClientGetter clientgetter.FixedClusterClientProviderInterface
 	// 'OnAddFunc' hook is called when an object comes about and the cache does not have a
 	// corresponding entry. Note this maybe happen as a result of a newly created k8s object
 	// or a modified object for which there was no entry in the cache
@@ -133,7 +131,7 @@ type NamespacedResourceWatcherCacheConfig struct {
 	OnResyncFunc ResyncFunc
 
 	// These funcs are needed to manipulate API-specific objects, such as flux's
-	// sourcev1.HelmRepository, in a generic fashion
+	// sourcev1beta2.HelmRepository, in a generic fashion
 	NewObjFunc    NewObjectFunc
 	NewListFunc   NewObjectListFunc
 	ListItemsFunc GetListItemsFunc
@@ -342,7 +340,7 @@ func (c *NamespacedResourceWatcherCache) watchLoop(watcher *watchutil.RetryWatch
 	}
 }
 
-func (c *NamespacedResourceWatcherCache) resyncAndNewRetryWatcher(bootstrap bool) (watcher *watchutil.RetryWatcher, eror error) {
+func (c *NamespacedResourceWatcherCache) resyncAndNewRetryWatcher(bootstrap bool) (*watchutil.RetryWatcher, error) {
 	log.Info("+resyncAndNewRetryWatcher()")
 	c.resyncCond.L.Lock()
 	defer func() {
@@ -355,6 +353,7 @@ func (c *NamespacedResourceWatcherCache) resyncAndNewRetryWatcher(bootstrap bool
 		log.Info("-resyncAndNewRetryWatcher()")
 	}()
 
+	var watcher *watchutil.RetryWatcher
 	var err error
 	var resourceVersion string
 
@@ -386,7 +385,7 @@ func (c *NamespacedResourceWatcherCache) Watch(options metav1.ListOptions) (watc
 
 	ctrlClient, err := c.config.ClientGetter.ControllerRuntime(ctx)
 	if err != nil {
-		return nil, status.Errorf(codes.FailedPrecondition, "unable to get client due to: %v", err)
+		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("Unable to get client due to: %w", err))
 	}
 
 	// this will start a watcher on all namespaces
@@ -405,7 +404,7 @@ func (c *NamespacedResourceWatcherCache) resync(bootstrap bool) (string, error) 
 	// confidence test: I'd like to make sure this is called within the context
 	// of resync, i.e. resync.Cond.L is locked by this goroutine.
 	if !common.RWMutexWriteLocked(c.resyncCond.L.(*sync.RWMutex)) {
-		return "", status.Errorf(codes.Internal, "Invalid state of the cache in resync()")
+		return "", connect.NewError(connect.CodeInternal, fmt.Errorf("Invalid state of the cache in resync()"))
 	}
 
 	// no need to do any of this on bootstrap, queue should be empty
@@ -422,7 +421,7 @@ func (c *NamespacedResourceWatcherCache) resync(bootstrap bool) (string, error) 
 		c.queue.Reset()
 
 		if err := c.config.OnResyncFunc(); err != nil {
-			return "", status.Errorf(codes.Internal, "invocation of [OnResync] failed due to: %v", err)
+			return "", connect.NewError(connect.CodeInternal, fmt.Errorf("Invocation of [OnResync] failed due to: %w", err))
 		}
 	}
 
@@ -436,7 +435,7 @@ func (c *NamespacedResourceWatcherCache) resync(bootstrap bool) (string, error) 
 	ctx := context.Background()
 	ctrlClient, err := c.config.ClientGetter.ControllerRuntime(ctx)
 	if err != nil {
-		return "", status.Errorf(codes.FailedPrecondition, "unable to get client due to: %v", err)
+		return "", connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("Unable to get client due to: %w", err))
 	}
 
 	// This code runs in the background, i.e. not in a context of any specific user request.
@@ -463,7 +462,7 @@ func (c *NamespacedResourceWatcherCache) resync(bootstrap bool) (string, error) 
 	rv := listObj.GetResourceVersion()
 	if rv == "" {
 		// fail fast, without a valid resource version the whole workflow breaks down
-		return "", status.Errorf(codes.Internal, "List() call response does not contain resource version")
+		return "", connect.NewError(connect.CodeInternal, fmt.Errorf("List() call response does not contain resource version"))
 	}
 
 	// re-populate the cache with current state from k8s
@@ -505,11 +504,23 @@ func (c *NamespacedResourceWatcherCache) processOneEvent(event watch.Event) {
 		// not quite sure why this happens (the docs don't say), but it seems to happen quite often
 		return
 	}
-	log.Infof("Got event: type: [%v] object:\n[%s]", event.Type, common.PrettyPrint(event.Object))
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Got event: type: [%v], object: ", event.Type))
+	if event.Object == nil {
+		sb.WriteString("<nil>")
+	} else if event.Type == watch.Deleted {
+		// when the object is deleted, we rarely care to look at all of its state,
+		// so save some log space
+		sb.WriteString(fmt.Sprintf("[%s]", common.PreferObjectName(event.Object)))
+	} else {
+		sb.WriteString(fmt.Sprintf("\n[%s]", common.PrettyPrint(event.Object)))
+	}
+	log.Info(sb.String())
+
 	switch event.Type {
 	case watch.Added, watch.Modified, watch.Deleted:
 		if obj, ok := event.Object.(ctrlclient.Object); !ok {
-			runtime.HandleError(fmt.Errorf("could not cast %s to *ctrlclient.Object", reflect.TypeOf(event.Object)))
+			runtime.HandleError(fmt.Errorf("could not cast %T to *ctrlclient.Object", event.Object))
 		} else if key, err := c.keyFor(obj); err != nil {
 			runtime.HandleError(err)
 		} else {
@@ -531,7 +542,7 @@ func (c *NamespacedResourceWatcherCache) syncHandler(key string) error {
 	defer log.Infof("-syncHandler(%s)", key)
 
 	// Convert the namespace/name string into a distinct namespace and name
-	name, err := c.fromKey(key)
+	name, err := c.NamespacedNameFromKey(key)
 	if err != nil {
 		return err
 	}
@@ -540,7 +551,7 @@ func (c *NamespacedResourceWatcherCache) syncHandler(key string) error {
 	ctx := context.Background()
 	ctrlClient, err := c.config.ClientGetter.ControllerRuntime(ctx)
 	if err != nil {
-		return status.Errorf(codes.FailedPrecondition, "unable to get client due to: %v", err)
+		return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("Unable to get client due to: %w", err))
 	}
 
 	// TODO: (gfichtenholt) confidence test: I'd like to make sure the caller has the read lock,
@@ -557,7 +568,7 @@ func (c *NamespacedResourceWatcherCache) syncHandler(key string) error {
 		if errors.IsNotFound(err) {
 			return c.onDelete(key)
 		} else {
-			return status.Errorf(codes.Internal, "error fetching object with key [%s]: %v", key, err)
+			return connect.NewError(connect.CodeInternal, fmt.Errorf("Error fetching object with key [%s]: %w", key, err))
 		}
 	}
 	return c.onAddOrModify(obj)
@@ -596,7 +607,7 @@ func (c *NamespacedResourceWatcherCache) onAddOrModify(obj ctrlclient.Object) (e
 		// clear that key so cache doesn't contain any stale info for this object
 		keysremoved, err2 := c.redisCli.Del(c.redisCli.Context(), key).Result()
 		if err2 != nil {
-			log.Errorf("failed to delete value for object [%s] from cache due to: %v", key, err2)
+			log.Errorf("Failed to delete value for object [%s] from cache due to: %v", key, err2)
 		} else {
 			// debugging an intermittent failure
 			log.Infof("Redis [DEL %s]: %d", key, keysremoved)
@@ -623,7 +634,7 @@ func (c *NamespacedResourceWatcherCache) onAddOrModify(obj ctrlclient.Object) (e
 
 // this is effectively a cache DEL operation
 func (c *NamespacedResourceWatcherCache) onDelete(key string) error {
-	log.V(4).Infof("+onDelete(%s, %s)")
+	log.V(4).Infof("+onDelete(%s)", key)
 	defer log.V(4).Infof("-onDelete")
 
 	delete, err := c.config.OnDeleteFunc(key)
@@ -645,8 +656,8 @@ func (c *NamespacedResourceWatcherCache) onDelete(key string) error {
 }
 
 // this is effectively a cache GET operation
-func (c *NamespacedResourceWatcherCache) fetchForOne(key string) (interface{}, error) {
-	log.InfoS("+fetchForOne", "key", key)
+func (c *NamespacedResourceWatcherCache) fetch(key string) (interface{}, error) {
+	log.InfoS("+fetch", "key", key)
 	// read back from cache: should be either:
 	//  - what we previously wrote OR
 	//  - redis.Nil if the key does  not exist or has been evicted due to memory pressure/TTL expiry
@@ -657,7 +668,7 @@ func (c *NamespacedResourceWatcherCache) fetchForOne(key string) (interface{}, e
 		log.V(4).Infof("Redis [GET %s]: Nil", key)
 		return nil, nil
 	} else if err != nil {
-		return nil, fmt.Errorf("fetchForOne() failed to get value for key [%s] from cache due to: %v", key, err)
+		return nil, fmt.Errorf("fetch() failed to get value for key [%s] from cache due to: %v", key, err)
 	}
 	log.V(4).Infof("Redis [GET %s]: %d bytes read", key, len(byteArray))
 
@@ -683,10 +694,10 @@ func (c *NamespacedResourceWatcherCache) fetchForOne(key string) (interface{}, e
 // be relied upon to be the "source of truth". So I removed it for now as I found it
 // of no use
 
-// parallelize the process of value retrieval because fetchForOne() calls
+// parallelize the process of value retrieval because fetch() calls
 // c.config.onGet() which will de-code the data from bytes into expected struct, which
 // may be computationally expensive and thus benefit from multiple threads of execution
-func (c *NamespacedResourceWatcherCache) fetchForMultiple(keys sets.String) (map[string]interface{}, error) {
+func (c *NamespacedResourceWatcherCache) fetchMultiple(keys sets.Set[string]) (map[string]interface{}, error) {
 	response := make(map[string]interface{})
 
 	type fetchValueJob struct {
@@ -710,7 +721,7 @@ func (c *NamespacedResourceWatcherCache) fetchForMultiple(keys sets.String) (map
 			// The following loop will only terminate when the request channel is
 			// closed (and there are no more items)
 			for job := range requestChan {
-				result, err := c.fetchForOne(job.key)
+				result, err := c.fetch(job.key)
 				responseChan <- fetchValueJobResult{job, result, err}
 			}
 			wg.Done()
@@ -743,31 +754,31 @@ func (c *NamespacedResourceWatcherCache) fetchForMultiple(keys sets.String) (map
 	return response, errorutil.NewAggregate(errs)
 }
 
-// the difference between 'fetchForMultiple' and 'GetForMultiple' is that 'fetch' will only
+// the difference between 'fetchMultiple' and 'GetMultiple' is that 'fetch' will only
 // get the value from the cache for a given or return nil if one is missing, whereas
-// 'GetForMultiple' will first call 'fetch' but then for any cache misses it will force
+// 'GetMultiple' will first call 'fetch' but then for any cache misses it will force
 // a re-computation of the value, if available, based on the input argument itemList and load
-// that result into the cache. So, 'GetForMultiple' provides a guarantee that if a key exists,
+// that result into the cache. So, 'GetMultiple' provides a guarantee that if a key exists,
 // it's value will be returned,
-// whereas 'fetchForMultiple' does not guarantee that.
+// whereas 'fetchMultiple' does not guarantee that.
 // The keys are expected to be in the format of the cache (the caller does that)
-func (c *NamespacedResourceWatcherCache) GetForMultiple(keys sets.String) (map[string]interface{}, error) {
+func (c *NamespacedResourceWatcherCache) GetMultiple(keys sets.Set[string]) (map[string]interface{}, error) {
 	c.resyncCond.L.(*sync.RWMutex).RLock()
 	defer c.resyncCond.L.(*sync.RWMutex).RUnlock()
 
-	log.Infof("+GetForMultiple(%s)", keys)
+	log.Infof("+GetMultiple(%s)", keys)
 	// at any given moment, the redis cache may only have a subset of the entire set of existing keys.
 	// Some key may have been evicted due to memory pressure and LRU eviction policy.
 	// ref: https://redis.io/topics/lru-cache
 	// so, first, let's fetch the entries that are still cached at this moment
 	// before redis maybe forced to evict those in order to make room for new ones
-	chartsUntyped, err := c.fetchForMultiple(keys)
+	chartsUntyped, err := c.fetchMultiple(keys)
 	if err != nil {
 		return nil, err
 	}
 
 	// now, re-compute and fetch the ones that are left over from the previous operation
-	keysLeft := sets.String{}
+	keysLeft := sets.Set[string]{}
 
 	for key, value := range chartsUntyped {
 		if value == nil {
@@ -807,13 +818,13 @@ func (c *NamespacedResourceWatcherCache) populateWith(items []ctrlclient.Object)
 	// confidence test: I'd like to make sure this is called within the context
 	// of resync, i.e. resync.Cond.L is locked by this goroutine.
 	if !common.RWMutexWriteLocked(c.resyncCond.L.(*sync.RWMutex)) {
-		return status.Errorf(codes.Internal, "Invalid state of the cache in populateWith()")
+		return connect.NewError(connect.CodeInternal, fmt.Errorf("Invalid state of the cache in populateWith()"))
 	}
 
-	keys := sets.String{}
+	keys := sets.Set[string]{}
 	for _, item := range items {
 		if key, err := c.keyFor(item); err != nil {
-			return status.Errorf(codes.Internal, "%v", err)
+			return connect.NewError(connect.CodeInternal, err)
 		} else {
 			keys.Insert(key)
 		}
@@ -824,7 +835,7 @@ func (c *NamespacedResourceWatcherCache) populateWith(items []ctrlclient.Object)
 	return nil
 }
 
-func (c *NamespacedResourceWatcherCache) computeValuesForKeys(keys sets.String) {
+func (c *NamespacedResourceWatcherCache) computeValuesForKeys(keys sets.Set[string]) {
 	var wg sync.WaitGroup
 	numWorkers := int(math.Min(float64(len(keys)), float64(maxWorkers)))
 	requestChan := make(chan string, numWorkers)
@@ -836,8 +847,8 @@ func (c *NamespacedResourceWatcherCache) computeValuesForKeys(keys sets.String) 
 			// The following loop will only terminate when the request channel is
 			// closed (and there are no more items)
 			for key := range requestChan {
-				// see GetForOne() for explanation of what is happening below
-				c.forceKey(key)
+				// see Get() for explanation of what is happening below
+				c.forceKey(key, false)
 			}
 			wg.Done()
 		}()
@@ -854,7 +865,7 @@ func (c *NamespacedResourceWatcherCache) computeValuesForKeys(keys sets.String) 
 	wg.Wait()
 }
 
-func (c *NamespacedResourceWatcherCache) computeAndFetchValuesForKeys(keys sets.String) (map[string]interface{}, error) {
+func (c *NamespacedResourceWatcherCache) computeAndFetchValuesForKeys(keys sets.Set[string]) (map[string]interface{}, error) {
 	type computeValueJob struct {
 		key string
 	}
@@ -876,8 +887,8 @@ func (c *NamespacedResourceWatcherCache) computeAndFetchValuesForKeys(keys sets.
 			// The following loop will only terminate when the request channel is
 			// closed (and there are no more items)
 			for job := range requestChan {
-				// see GetForOne() for explanation of what is happening below
-				value, err := c.forceAndFetchKey(job.key)
+				// see Get() for explanation of what is happening below
+				value, err := c.ForceAndFetch(job.key, false)
 				responseChan <- computeValueJobResult{job, value, err}
 			}
 			wg.Done()
@@ -937,35 +948,51 @@ func (c *NamespacedResourceWatcherCache) KeyForNamespacedName(name types.Namespa
 
 // the opposite of keyFor()
 // the goal is to keep the details of what exactly the key looks like localized to one piece of code
-func (c *NamespacedResourceWatcherCache) fromKey(key string) (*types.NamespacedName, error) {
+func (c *NamespacedResourceWatcherCache) NamespacedNameFromKey(key string) (*types.NamespacedName, error) {
 	parts := strings.Split(key, KeySegmentsSeparator)
 	if len(parts) != 3 || parts[0] != c.config.Gvr.Resource || len(parts[1]) == 0 || len(parts[2]) == 0 {
-		return nil, status.Errorf(codes.Internal, "invalid key [%s]", key)
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("Invalid key [%s]", key))
 	}
 	return &types.NamespacedName{Namespace: parts[1], Name: parts[2]}, nil
 }
 
-// GetForOne() is like fetchForOne() but if there is a cache miss, it will also check the
+// Get() is like fetch() but if there is a cache miss, it will also check the
 // k8s for the corresponding object, process it and then add it to the cache and return the
 // result.
-func (c *NamespacedResourceWatcherCache) GetForOne(key string) (interface{}, error) {
+func (c *NamespacedResourceWatcherCache) Get(key string) (interface{}, error) {
 	c.resyncCond.L.(*sync.RWMutex).RLock()
 	defer c.resyncCond.L.(*sync.RWMutex).RUnlock()
 
-	log.Infof("+GetForOne(%s)", key)
+	log.Infof("+Get(%s)", key)
 	var value interface{}
 	var err error
-	if value, err = c.fetchForOne(key); err != nil {
+	if value, err = c.fetch(key); err != nil {
 		return nil, err
 	} else if value == nil {
 		// cache miss
-		return c.forceAndFetchKey(key)
+		return c.ForceAndFetch(key, false)
 	}
 	return value, nil
 }
 
-func (c *NamespacedResourceWatcherCache) forceKey(key string) {
-	c.queue.Add(key)
+// force a particular key to be processed
+func (c *NamespacedResourceWatcherCache) forceKey(key string, skipIfProcessing bool) {
+	if skipIfProcessing {
+		// There is one use case when the client needs to be able to do an Add(), regardless of whether
+		// the item is being processed, e.g. when the corresponding value goes through several quick changes.
+		// Then there is a separate use case when the client doesn't want to do an Add
+		// if the item is currently being processed, such as a .Get() operation that leads to a lengthy
+		// .Add() cuncurrently with another .Get() immediately. Executing two 2 .Add() operations does
+		// not solve any problems just slows the whole thing down.
+		// This is what the UX is currently doing when you select an OCI package to deploy:
+		//   both GetAvailablePackageVersions() and GetAvailablePackageDetail()
+		// are called concurrently. This is really a performance optimization to make sure that .Add() is only
+		// executed once
+		c.queue.AddIfNotProcessing(key)
+	} else {
+		c.queue.Add(key)
+	}
+
 	// now need to wait until this item has been processed by runWorker().
 	// a little bit in-efficient: syncHandler() will eventually call config.onAdd()
 	// which encode the data as []byte before storing it in the cache. That part is fine.
@@ -975,17 +1002,31 @@ func (c *NamespacedResourceWatcherCache) forceKey(key string) {
 	c.queue.WaitUntilForgotten(key)
 }
 
-func (c *NamespacedResourceWatcherCache) forceAndFetchKey(key string) (interface{}, error) {
-	c.forceKey(key)
+func (c *NamespacedResourceWatcherCache) ForceAndFetch(key string, skipIfProcessing bool) (interface{}, error) {
+	c.forceKey(key, skipIfProcessing)
+	// TODO (gfichtenholt): if there was an error while processing the cache entry, such as
+	// E0903 09:07:17.660753       1 watcher_cache.go:595] Invocation of [onAdd] for object {
+	//  ...
+	// } failed due to: rpc error: code = Internal desc = No repository lister found for OCI registry with URL: [oci://...]
+	// it would be nice to surface that error here to the caller rather than
+	// have redis return Nil for the key, same as a regular cache miss.
+	// That requires saving more state in the cache
+
 	// yes, there is a small time window here between after we are done with WaitUntilForgotten()
 	// and the following fetch, where another concurrent goroutine may force the newly added
 	// cache entry out, but that is an edge case and I am willing to overlook it for now
 	// To fix it, would somehow require WaitUntilForgotten() returning a value from a cache, so
 	// the whole thing would be atomic. Don't know how to do this yet
-	return c.fetchForOne(key)
+	return c.fetch(key)
 }
 
-// this func is used by unit tests only
+// this func is used by unit tests only to make sure entries were processed by
+// cache as expected and without race conditions. The general pattern for this is
+// in the unit test code we do
+// - cache.ExpectAdd(key)
+// - perform some k8s flux HelmRepository CRD operation...
+// - cache.WaitUntilForgotten(key)
+// - at this point we can guarantee the cache entry has been (asynchronously) processed...
 func (c *NamespacedResourceWatcherCache) ExpectAdd(key string) {
 	c.queue.ExpectAdd(key)
 }
@@ -1008,7 +1049,7 @@ func (c *NamespacedResourceWatcherCache) ExpectResync() (chan int, error) {
 	}()
 
 	if c.resyncCh != nil {
-		return nil, status.Errorf(codes.Internal, "ExpectSync() already called")
+		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("ExpectSync() already called"))
 	} else {
 		c.resyncCh = make(chan int, 1)
 		// this channel will be closed and nil'ed out at the end of resync()

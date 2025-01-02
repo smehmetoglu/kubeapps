@@ -1,10 +1,10 @@
-// Copyright 2018-2022 the Kubeapps contributors.
+// Copyright 2018-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import {
   AvailablePackageReference,
   InstalledPackageReference,
-} from "gen/kubeappsapis/core/packages/v1alpha1/packages";
+} from "gen/kubeappsapis/core/packages/v1alpha1/packages_pb";
 
 export const app = {
   apps: {
@@ -89,7 +89,7 @@ export const app = {
       `/c/${cluster}/ns/${namespace}/operators-instances/new/${csvName}/${crdName}`,
   },
   config: {
-    apprepositories: (cluster: string, namespace: string) =>
+    pkgrepositories: (cluster: string, namespace: string) =>
       `/c/${cluster}/ns/${namespace}/config/repos`,
     operators: (cluster: string, namespace: string) => `/c/${cluster}/ns/${namespace}/operators`,
   },
@@ -98,30 +98,6 @@ export const app = {
 function withNS(namespace: string) {
   return namespace ? `namespaces/${namespace}/` : "";
 }
-
-export const backend = {
-  namespaces: {
-    list: (cluster: string) => `api/v1/clusters/${cluster}/namespaces`,
-  },
-  apprepositories: {
-    base: (cluster: string, namespace: string) =>
-      `api/v1/clusters/${cluster}/${withNS(namespace)}apprepositories`,
-    create: (cluster: string, namespace: string) =>
-      backend.apprepositories.base(cluster, namespace),
-    list: (cluster: string, namespace: string) => backend.apprepositories.base(cluster, namespace),
-    validate: (cluster: string, namespace: string) =>
-      `${backend.apprepositories.base(cluster, namespace)}/validate`,
-    get: (cluster: string, namespace: string, name: string) =>
-      `${backend.apprepositories.base(cluster, namespace)}/${name}`,
-    delete: (cluster: string, namespace: string, name: string) =>
-      `${backend.apprepositories.base(cluster, namespace)}/${name}`,
-    refresh: (cluster: string, namespace: string, name: string) =>
-      `${backend.apprepositories.base(cluster, namespace)}/${name}/refresh`,
-    update: (cluster: string, namespace: string, name: string) =>
-      `${backend.apprepositories.base(cluster, namespace)}/${name}`,
-  },
-  canI: (cluster: string) => `api/v1/clusters/${cluster}/can-i`,
-};
 
 export const api = {
   // URLs which are accessing the k8s API server directly are grouped together
@@ -134,9 +110,6 @@ export const api = {
     v1: (cluster: string) => `${api.k8s.base(cluster)}/api/v1`,
     groupVersion: (cluster: string, groupVersion: string) =>
       `${api.k8s.base(cluster)}/apis/${groupVersion}`,
-    namespaces: (cluster: string) => `${api.k8s.base(cluster)}/api/v1/namespaces`,
-    namespace: (cluster: string, namespace: string) =>
-      namespace ? `${api.k8s.namespaces(cluster)}/${namespace}` : `${api.k8s.base(cluster)}/api/v1`,
     operators: {
       operators: (cluster: string, namespace: string) =>
         `${api.k8s.base(cluster)}/apis/packages.operators.coreos.com/v1/${withNS(
@@ -180,8 +153,8 @@ export const api = {
   },
 
   operators: {
-    operatorIcon: (cluster: string, namespace: string, name: string) =>
-      `api/v1/clusters/${cluster}/namespaces/${namespace}/operator/${name}/logo`,
+    operatorIcon: (_cluster: string, namespace: string, name: string) =>
+      `apis/operators/namespaces/${namespace}/operator/${name}/logo`,
   },
 
   kubeappsapis: "apis",

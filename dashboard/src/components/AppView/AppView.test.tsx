@@ -1,11 +1,12 @@
-// Copyright 2018-2022 the Kubeapps contributors.
+// Copyright 2018-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
+import { act } from "@testing-library/react";
 import actions from "actions";
-import Alert from "components/js/Alert";
+import AlertGroup from "components/AlertGroup";
+import ApplicationStatus from "components/ApplicationStatus/ApplicationStatus";
 import LoadingWrapper from "components/LoadingWrapper/LoadingWrapper";
 import PageHeader from "components/PageHeader";
-import ApplicationStatusContainer from "containers/ApplicationStatusContainer";
 import {
   AvailablePackageDetail,
   AvailablePackageReference,
@@ -20,15 +21,21 @@ import {
   PackageAppVersion,
   ResourceRef,
   VersionReference,
-} from "gen/kubeappsapis/core/packages/v1alpha1/packages";
-import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins";
-import { act } from "react-dom/test-utils";
-import { MemoryRouter, Route } from "react-router-dom";
+} from "gen/kubeappsapis/core/packages/v1alpha1/packages_pb";
+import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins_pb";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { IConfigState } from "reducers/config";
 import { InstalledPackage } from "shared/InstalledPackage";
 import PackagesService from "shared/PackagesService";
-import { defaultStore, getStore, mountWrapper } from "shared/specs/mountWrapper";
-import { DeleteError, FetchError } from "shared/types";
-import { PluginNames } from "shared/utils";
+import { getStore, mountWrapper } from "shared/specs/mountWrapper";
+import {
+  CustomInstalledPackageDetail,
+  DeleteError,
+  FetchError,
+  IInstalledPackageState,
+  IStoreState,
+  PluginNames,
+} from "shared/types";
 import { getType } from "typesafe-actions";
 import AccessURLTable from "./AccessURLTable/AccessURLTable";
 import DeleteButton from "./AppControls/DeleteButton/DeleteButton";
@@ -49,7 +56,7 @@ const routeParams = {
 const routePathParam = `/c/${routeParams.cluster}/ns/${routeParams.namespace}/apps/${routeParams.plugin.name}/${routeParams.plugin.version}/${routeParams.releaseName}`;
 const routePath = "/c/:cluster/ns/:namespace/apps/:pluginName/:pluginVersion/:releaseName";
 
-const installedPackage = {
+const installedPackage = new InstalledPackageDetail({
   name: "test",
   postInstallationNotes: "test",
   valuesApplied: "test",
@@ -59,24 +66,23 @@ const installedPackage = {
     context: { cluster: "", namespace: "chart-namespace" } as Context,
   } as AvailablePackageReference,
   currentVersion: { appVersion: "10.0.0", pkgVersion: "1.0.0" } as PackageAppVersion,
-  installedPackageRef: {
+  installedPackageRef: new InstalledPackageReference({
     identifier: "apache/1",
-    pkgVersion: "1.0.0",
     context: { cluster: "", namespace: "package-namespace" } as Context,
     plugin: { name: "my.plugin", version: "0.0.1" } as Plugin,
-  } as InstalledPackageReference,
+  }),
   latestMatchingVersion: { appVersion: "10.0.0", pkgVersion: "1.0.0" } as PackageAppVersion,
   latestVersion: { appVersion: "10.0.0", pkgVersion: "1.0.0" } as PackageAppVersion,
   pkgVersionReference: { version: "1" } as VersionReference,
   reconciliationOptions: {},
   status: {
     ready: true,
-    reason: InstalledPackageStatus_StatusReason.STATUS_REASON_INSTALLED,
+    reason: InstalledPackageStatus_StatusReason.INSTALLED,
     userReason: "deployed",
   } as InstalledPackageStatus,
-} as InstalledPackageDetail;
+});
 
-const availablePackageDetail = {
+const availablePackageDetail = new AvailablePackageDetail({
   displayName: "my-cool-package-1",
   availablePackageRef: {
     identifier: "apache/1",
@@ -84,52 +90,53 @@ const availablePackageDetail = {
     context: { cluster: "", namespace: "chart-namespace" } as Context,
   } as AvailablePackageReference,
   version: { appVersion: "4.5.6", pkgVersion: "1.2.3" },
-} as AvailablePackageDetail;
+});
 
 const resourceRefs = {
-  configMap: { apiVersion: "v1", kind: "ConfigMap", name: "cm-one" } as ResourceRef,
-  deployment: {
+  configMap: new ResourceRef({ apiVersion: "v1", kind: "ConfigMap", name: "cm-one" }),
+  deployment: new ResourceRef({
     apiVersion: "apps/v1",
     kind: "Deployment",
     name: "deployment-one",
-  } as ResourceRef,
-  service: { apiVersion: "v1", kind: "Service", name: "svc-one" } as ResourceRef,
-  ingress: {
+  }),
+  service: new ResourceRef({ apiVersion: "v1", kind: "Service", name: "svc-one" }),
+  ingress: new ResourceRef({
     apiVersion: "extensions/v1",
     kind: "Ingress",
     name: "ingress-one",
-  } as ResourceRef,
-  secret: {
+  }),
+  secret: new ResourceRef({
     apiVersion: "v1",
     kind: "Secret",
     name: "secret-one",
-  } as ResourceRef,
-  daemonset: {
+  }),
+  daemonset: new ResourceRef({
     apiVersion: "apps/v1",
     kind: "DaemonSet",
     name: "daemonset-one",
-  } as ResourceRef,
-  statefulset: {
+  }),
+  statefulset: new ResourceRef({
     apiVersion: "apps/v1",
     kind: "StatefulSet",
     name: "statefulset-one",
-  } as ResourceRef,
+  }),
 };
 
 const validState = {
   apps: {
-    selected: {
+    isFetching: false,
+    items: [installedPackage],
+    selected: new CustomInstalledPackageDetail(1, {
       ...installedPackage,
-      resourceRefs: [resourceRefs.configMap] as ResourceRef[],
-    },
-  },
+    }),
+  } as IInstalledPackageState,
 };
 
 beforeEach(() => {
   InstalledPackage.GetInstalledPackageResourceRefs = jest
     .fn()
     .mockReturnValue(
-      Promise.resolve({ resourceRefs: [] } as GetInstalledPackageResourceRefsResponse),
+      Promise.resolve(new GetInstalledPackageResourceRefsResponse({ resourceRefs: [] })),
     );
   InstalledPackage.GetInstalledPackageDetail = jest.fn().mockReturnValue(
     Promise.resolve({
@@ -141,6 +148,43 @@ beforeEach(() => {
       availablePackageDetail: {},
     } as GetAvailablePackageDetailResponse),
   );
+
+  // mock the window.matchMedia for selecting the theme
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    configurable: true,
+    value: jest.fn().mockImplementation(query => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: jest.fn(),
+      removeListener: jest.fn(),
+      addEventListener: jest.fn(),
+      removeEventListener: jest.fn(),
+      dispatchEvent: jest.fn(),
+    })),
+  });
+
+  // mock the window.ResizeObserver, required by the MonacoEditor for the layout
+  Object.defineProperty(window, "ResizeObserver", {
+    writable: true,
+    configurable: true,
+    value: jest.fn().mockImplementation(() => ({
+      observe: jest.fn(),
+      unobserve: jest.fn(),
+      disconnect: jest.fn(),
+    })),
+  });
+
+  // mock the window.HTMLCanvasElement.getContext(), required by the MonacoEditor for the layout
+  Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
+    writable: true,
+    configurable: true,
+    value: jest.fn().mockImplementation(() => ({
+      clearRect: jest.fn(),
+      fillRect: jest.fn(),
+    })),
+  });
 });
 afterEach(() => {
   jest.resetAllMocks();
@@ -150,9 +194,46 @@ describe("AppView", () => {
   it("renders a loading wrapper", async () => {
     let wrapper: any;
     await act(async () => {
-      wrapper = mountWrapper(defaultStore, <AppView />);
+      wrapper = mountWrapper(
+        getStore({
+          apps: {
+            selected: undefined,
+            isFetching: true,
+          } as IInstalledPackageState,
+        } as Partial<IStoreState>),
+        <MemoryRouter initialEntries={[routePathParam]}>
+          <Routes>
+            <Route path={routePath} element={<AppView />} />
+          </Routes>
+        </MemoryRouter>,
+        false,
+      );
     });
-    expect(wrapper.find(LoadingWrapper)).toExist();
+    expect(wrapper.find(LoadingWrapper).prop("loaded")).toBe(false);
+  });
+
+  it("does not render an loading wrapper if it isn't fetching", async () => {
+    let wrapper: any;
+    await act(async () => {
+      wrapper = mountWrapper(
+        getStore({
+          apps: {
+            selected: undefined,
+            isFetching: false,
+            error: new Error("foo not found"),
+          } as IInstalledPackageState,
+        } as Partial<IStoreState>),
+        <MemoryRouter initialEntries={[routePathParam]}>
+          <Routes>
+            <Route path={routePath} element={<AppView />} />
+          </Routes>
+        </MemoryRouter>,
+        false,
+      );
+    });
+    expect(wrapper.find(LoadingWrapper).prop("loaded")).toBe(true);
+    expect(wrapper.find(AlertGroup).html()).toContain("foo not found");
+    expect(wrapper.find(PageHeader)).not.toExist();
   });
 
   it("renders a fetch error only", async () => {
@@ -160,15 +241,18 @@ describe("AppView", () => {
 
     await act(async () => {
       wrapper = mountWrapper(
-        getStore({ apps: { error: new FetchError("boom!") } }),
+        getStore({
+          apps: { error: new FetchError("boom!") } as IInstalledPackageState,
+        } as Partial<IStoreState>),
         <MemoryRouter initialEntries={[routePathParam]}>
-          <Route path={routePath}>
-            <AppView />
-          </Route>
+          <Routes>
+            <Route path={routePath} element={<AppView />} />
+          </Routes>
         </MemoryRouter>,
+        false,
       );
     });
-    expect(wrapper.find(Alert)).toExist();
+    expect(wrapper.find(AlertGroup)).toExist();
     expect(wrapper.find(PageHeader)).not.toExist();
   });
 
@@ -177,7 +261,7 @@ describe("AppView", () => {
     await act(async () => {
       wrapper = mountWrapper(
         getStore({
-          apps: { selected: { ...installedPackage } },
+          apps: { selected: { ...installedPackage } } as IInstalledPackageState,
           config: {
             customAppViews: [
               {
@@ -186,13 +270,14 @@ describe("AppView", () => {
                 repository: "apache",
               },
             ],
-          },
-        }),
+          } as IConfigState,
+        } as Partial<IStoreState>),
         <MemoryRouter initialEntries={[routePathParam]}>
-          <Route path={routePath}>
-            <AppView />
-          </Route>
+          <Routes>
+            <Route path={routePath} element={<AppView />} />
+          </Routes>
         </MemoryRouter>,
+        false,
       );
     });
     expect(wrapper.find(CustomAppView)).toExist();
@@ -203,7 +288,7 @@ describe("AppView", () => {
     await act(async () => {
       wrapper = mountWrapper(
         getStore({
-          apps: { selected: { ...installedPackage } },
+          apps: { selected: { ...installedPackage } } as IInstalledPackageState,
           config: {
             customAppViews: [
               {
@@ -212,13 +297,14 @@ describe("AppView", () => {
                 repository: "demo-repo",
               },
             ],
-          },
-        }),
+          } as IConfigState,
+        } as Partial<IStoreState>),
         <MemoryRouter initialEntries={[routePathParam]}>
-          <Route path={routePath}>
-            <AppView />
-          </Route>
+          <Routes>
+            <Route path={routePath} element={<AppView />} />
+          </Routes>
         </MemoryRouter>,
+        false,
       );
     });
     expect(wrapper.find(CustomAppView)).not.toExist();
@@ -232,14 +318,14 @@ describe("AppView", () => {
           apps: {
             selected: { ...installedPackage },
             selectedDetails: { ...availablePackageDetail },
-          },
-          config: {},
-        }),
+          } as IInstalledPackageState,
+        } as Partial<IStoreState>),
         <MemoryRouter initialEntries={[routePathParam]}>
-          <Route path={routePath}>
-            <AppView />
-          </Route>
+          <Routes>
+            <Route path={routePath} element={<AppView />} />
+          </Routes>
         </MemoryRouter>,
+        false,
       );
     });
     expect(wrapper.find(PageHeader).text()).toContain("from package my-cool-package-1");
@@ -258,14 +344,14 @@ describe("AppView", () => {
                 plugin: { name: PluginNames.PACKAGES_HELM, version: "v1alpha1" } as Plugin,
               } as InstalledPackageReference,
             },
-          },
-          config: {},
-        }),
+          } as IInstalledPackageState,
+        } as Partial<IStoreState>),
         <MemoryRouter initialEntries={[routePathParam]}>
-          <Route path={routePath}>
-            <AppView />
-          </Route>
+          <Routes>
+            <Route path={routePath} element={<AppView />} />
+          </Routes>
         </MemoryRouter>,
+        false,
       );
     });
 
@@ -279,14 +365,14 @@ describe("AppView", () => {
     await act(async () => {
       wrapper = mountWrapper(
         getStore({
-          apps: { selected: { ...installedPackage } },
-          config: {},
-        }),
+          apps: { selected: { ...installedPackage } } as IInstalledPackageState,
+        } as Partial<IStoreState>),
         <MemoryRouter initialEntries={[routePathParam]}>
-          <Route path={routePath}>
-            <AppView />
-          </Route>
+          <Routes>
+            <Route path={routePath} element={<AppView />} />
+          </Routes>
         </MemoryRouter>,
+        false,
       );
     });
     expect(wrapper.find(UpgradeButton)).toExist();
@@ -315,12 +401,15 @@ describe("AppView", () => {
       let wrapper: any;
       await act(async () => {
         wrapper = mountWrapper(
-          getStore({ apps: { selected: installedPackage } }),
+          getStore({
+            apps: { selected: installedPackage } as IInstalledPackageState,
+          } as Partial<IStoreState>),
           <MemoryRouter initialEntries={[routePathParam]}>
-            <Route path={routePath}>
-              <AppView />
-            </Route>
+            <Routes>
+              <Route path={routePath} element={<AppView />} />
+            </Routes>
           </MemoryRouter>,
+          false,
         );
       });
       wrapper.update();
@@ -347,12 +436,15 @@ describe("AppView", () => {
       let wrapper: any;
       await act(async () => {
         wrapper = mountWrapper(
-          getStore({ apps: { selected: installedPackage } }),
+          getStore({
+            apps: { selected: installedPackage } as IInstalledPackageState,
+          } as Partial<IStoreState>),
           <MemoryRouter initialEntries={[routePathParam]}>
-            <Route path={routePath}>
-              <AppView />
-            </Route>
+            <Routes>
+              <Route path={routePath} element={<AppView />} />
+            </Routes>
           </MemoryRouter>,
+          false,
         );
       });
       wrapper.update();
@@ -375,7 +467,7 @@ describe("AppView", () => {
         wrapper = mountWrapper(getStore(validState), <AppView />);
       });
       expect(wrapper.find(PackageInfo)).toExist();
-      expect(wrapper.find(ApplicationStatusContainer)).toExist();
+      expect(wrapper.find(ApplicationStatus)).toExist();
       expect(wrapper.find(".control-buttons")).toExist();
       expect(wrapper.find(AppNotes)).toExist();
       expect(wrapper.find(ResourceTabs)).toExist();
@@ -386,15 +478,19 @@ describe("AppView", () => {
       let wrapper: any;
       await act(async () => {
         wrapper = mountWrapper(
-          getStore({ ...validState, apps: { ...validState.apps, error: new Error("Boom!") } }),
+          getStore({
+            ...validState,
+            apps: { ...validState.apps, error: new Error("Boom!") } as IInstalledPackageState,
+          } as Partial<IStoreState>),
           <MemoryRouter initialEntries={[routePathParam]}>
-            <Route path={routePath}>
-              <AppView />
-            </Route>
+            <Routes>
+              <Route path={routePath} element={<AppView />} />
+            </Routes>
           </MemoryRouter>,
+          false,
         );
       });
-      const err = wrapper.find(Alert);
+      const err = wrapper.find(AlertGroup);
       expect(err).toExist();
       expect(err.html()).toContain("Boom!");
     });
@@ -405,16 +501,17 @@ describe("AppView", () => {
         wrapper = mountWrapper(
           getStore({
             ...validState,
-            apps: { ...validState.apps, error: new DeleteError("Boom!") },
-          }),
+            apps: { ...validState.apps, error: new DeleteError("Boom!") } as IInstalledPackageState,
+          } as Partial<IStoreState>),
           <MemoryRouter initialEntries={[routePathParam]}>
-            <Route path={routePath}>
-              <AppView />
-            </Route>
+            <Routes>
+              <Route path={routePath} element={<AppView />} />
+            </Routes>
           </MemoryRouter>,
+          false,
         );
       });
-      const err = wrapper.find(Alert);
+      const err = wrapper.find(AlertGroup);
       expect(err).toExist();
       expect(err.html()).toContain("Unable to delete the application. Received: Boom!");
     });
@@ -430,17 +527,20 @@ describe("AppView", () => {
     let wrapper: any;
     await act(async () => {
       wrapper = mountWrapper(
-        getStore({ apps: { selected: installedPackage } }),
+        getStore({
+          apps: { selected: installedPackage } as IInstalledPackageState,
+        } as Partial<IStoreState>),
         <MemoryRouter initialEntries={[routePathParam]}>
-          <Route path={routePath}>
-            <AppView />
-          </Route>
+          <Routes>
+            <Route path={routePath} element={<AppView />} />
+          </Routes>
         </MemoryRouter>,
+        false,
       );
     });
     wrapper.update();
 
-    const applicationStatus = wrapper.find(ApplicationStatusContainer);
+    const applicationStatus = wrapper.find(ApplicationStatus);
     expect(applicationStatus).toExist();
 
     expect(applicationStatus.prop("statefulsetRefs")).toEqual([resourceRefs.statefulset]);
@@ -460,16 +560,19 @@ describe("AppView actions", () => {
         resourceRefs: apiResourceRefs,
       } as GetInstalledPackageResourceRefsResponse),
     );
-    const store = getStore({ apps: { selected: installedPackage } });
+    const store = getStore({
+      apps: { selected: installedPackage } as IInstalledPackageState,
+    } as Partial<IStoreState>);
 
     await act(async () => {
       mountWrapper(
         store,
         <MemoryRouter initialEntries={[routePathParam]}>
-          <Route path={routePath}>
-            <AppView />
-          </Route>
+          <Routes>
+            <Route path={routePath} element={<AppView />} />
+          </Routes>
         </MemoryRouter>,
+        false,
       );
     });
 
@@ -492,7 +595,6 @@ describe("AppView actions", () => {
           watch: false,
           handler: expect.any(Function),
           onError: expect.any(Function),
-          onComplete: expect.any(Function),
         },
       },
       {
@@ -503,7 +605,6 @@ describe("AppView actions", () => {
           watch: true,
           handler: expect.any(Function),
           onError: expect.any(Function),
-          onComplete: expect.any(Function),
         },
       },
     ]);
@@ -516,16 +617,19 @@ describe("AppView actions", () => {
       } as GetInstalledPackageResourceRefsResponse),
     );
 
-    const store = getStore({ apps: { selected: installedPackage } });
+    const store = getStore({
+      apps: { selected: installedPackage } as IInstalledPackageState,
+    } as Partial<IStoreState>);
     let wrapper: any;
     await act(async () => {
       wrapper = mountWrapper(
         store,
         <MemoryRouter initialEntries={[routePathParam]}>
-          <Route path={routePath}>
-            <AppView />
-          </Route>
+          <Routes>
+            <Route path={routePath} element={<AppView />} />
+          </Routes>
         </MemoryRouter>,
+        false,
       );
     });
     await act(async () => {
@@ -552,12 +656,7 @@ describe("AppView actions", () => {
           watch,
           handler: expect.any(Function),
           onError: expect.any(Function),
-          onComplete: expect.any(Function),
         },
-      },
-      {
-        type: getType(actions.kube.closeRequestResources),
-        payload: installedPackage.installedPackageRef,
       },
     ]);
   });

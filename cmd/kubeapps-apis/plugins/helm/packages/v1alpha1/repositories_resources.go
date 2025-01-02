@@ -1,4 +1,4 @@
-// Copyright 2022 the Kubeapps contributors.
+// Copyright 2022-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 package main
@@ -6,8 +6,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
+
 	apprepov1alpha1 "github.com/vmware-tanzu/kubeapps/cmd/apprepository-controller/pkg/apis/apprepository/v1alpha1"
-	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/statuserror"
+	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/connecterror"
 	k8scorev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -16,8 +18,8 @@ import (
 	log "k8s.io/klog/v2"
 )
 
-func (s *Server) getPkgRepositoryResource(ctx context.Context, cluster, namespace string) (dynamic.ResourceInterface, error) {
-	_, dynClient, err := s.GetClients(ctx, cluster)
+func (s *Server) getPkgRepositoryResource(headers http.Header, cluster, namespace string) (dynamic.ResourceInterface, error) {
+	dynClient, err := s.clientGetter.Dynamic(headers, cluster)
 	if err != nil {
 		return nil, err
 	}
@@ -31,8 +33,8 @@ func (s *Server) getPkgRepositoryResource(ctx context.Context, cluster, namespac
 }
 
 // getPkgRepository returns the package repository for the given cluster, namespace and identifier
-func (s *Server) getPkgRepository(ctx context.Context, cluster, namespace, identifier string) (*apprepov1alpha1.AppRepository, *k8scorev1.Secret, *k8scorev1.Secret, error) {
-	client, err := s.getClient(ctx, cluster, namespace)
+func (s *Server) getPkgRepository(ctx context.Context, headers http.Header, cluster, namespace, identifier string) (*apprepov1alpha1.AppRepository, *k8scorev1.Secret, *k8scorev1.Secret, error) {
+	client, err := s.getClient(headers, cluster, namespace)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -43,11 +45,11 @@ func (s *Server) getPkgRepository(ctx context.Context, cluster, namespace, ident
 	}
 	appRepo := &apprepov1alpha1.AppRepository{}
 	if err = client.Get(ctx, key, appRepo); err != nil {
-		return nil, nil, nil, statuserror.FromK8sError("get", AppRepositoryKind, key.String(), err)
+		return nil, nil, nil, connecterror.FromK8sError("get", AppRepositoryKind, key.String(), err)
 	}
 
 	// Auth and TLS
-	typedClient, _, err := s.GetClients(ctx, cluster)
+	typedClient, err := s.clientGetter.Typed(headers, cluster)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -75,15 +77,15 @@ func (s *Server) getPkgRepository(ctx context.Context, cluster, namespace, ident
 }
 
 // updatePkgRepository updates a package repository for the given cluster, namespace and identifier
-func (s *Server) updatePkgRepository(ctx context.Context, cluster, namespace string, newPkgRepository *apprepov1alpha1.AppRepository) error {
+func (s *Server) updatePkgRepository(ctx context.Context, headers http.Header, cluster, namespace string, newPkgRepository *apprepov1alpha1.AppRepository) error {
 
-	client, err := s.getClient(ctx, cluster, namespace)
+	client, err := s.getClient(headers, cluster, namespace)
 	if err != nil {
 		return err
 	}
 
 	if err = client.Update(ctx, newPkgRepository); err != nil {
-		return statuserror.FromK8sError("get", AppRepositoryKind, newPkgRepository.Name, err)
+		return connecterror.FromK8sError("update", AppRepositoryKind, newPkgRepository.Name, err)
 	}
 	return nil
 }

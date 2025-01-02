@@ -1,20 +1,21 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2024 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 package main
 
 import (
 	"context"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"os"
 	"testing"
 	"time"
 
-	helmv2 "github.com/fluxcd/helm-controller/api/v2beta1"
+	"github.com/bufbuild/connect-go"
+	helmv2beta2 "github.com/fluxcd/helm-controller/api/v2beta2"
 	fluxmeta "github.com/fluxcd/pkg/apis/meta"
-	sourcev1 "github.com/fluxcd/source-controller/api/v1beta2"
+	sourcev1 "github.com/fluxcd/source-controller/api/v1"
+	sourcev1beta2 "github.com/fluxcd/source-controller/api/v1beta2"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/packages/v1alpha1"
@@ -38,12 +39,11 @@ type testSpecGetInstalledPackages struct {
 	chartTarGz                string
 	chartSpecVersion          string // could be semver constraint, e.g. "<=6.7.1"
 	chartArtifactVersion      string // must be specific, e.g. "6.7.1"
-	releaseName               string
-	releaseNamespace          string
+	releaseMeta               metav1.ObjectMeta
 	releaseValues             *v1.JSON
 	releaseSuspend            bool
 	releaseServiceAccountName string
-	releaseStatus             helmv2.HelmReleaseStatus
+	releaseStatus             helmv2beta2.HelmReleaseStatus
 	// only used to test edge cases now, most tests should not set this
 	targetNamespace string
 }
@@ -68,6 +68,38 @@ func TestGetInstalledPackageSummariesWithoutPagination(t *testing.T) {
 			expectedResponse: &corev1.GetInstalledPackageSummariesResponse{
 				InstalledPackageSummaries: []*corev1.InstalledPackageSummary{
 					redis_summary_failed,
+				},
+			},
+		},
+		{
+			name: "returns installed packages when install fails (2)",
+			request: &corev1.GetInstalledPackageSummariesRequest{
+				Context: &corev1.Context{Namespace: "test"},
+			},
+			existingObjs: []testSpecGetInstalledPackages{
+				redis_existing_spec_failed_2,
+			},
+			expectedStatusCode: codes.OK,
+			expectedResponse: &corev1.GetInstalledPackageSummariesResponse{
+				InstalledPackageSummaries: []*corev1.InstalledPackageSummary{
+					redis_summary_failed_2,
+				},
+			},
+		},
+		{
+			// when metadata.generation != status.observedGeneration
+			// https://github.com/vmware-tanzu/kubeapps/issues/5577
+			name: "returns installed packages when install fails (3)",
+			request: &corev1.GetInstalledPackageSummariesRequest{
+				Context: &corev1.Context{Namespace: "test"},
+			},
+			existingObjs: []testSpecGetInstalledPackages{
+				redis_existing_spec_transient,
+			},
+			expectedStatusCode: codes.OK,
+			expectedResponse: &corev1.GetInstalledPackageSummariesResponse{
+				InstalledPackageSummaries: []*corev1.InstalledPackageSummary{
+					redis_summary_transient,
 				},
 			},
 		},
@@ -188,27 +220,24 @@ func TestGetInstalledPackageSummariesWithoutPagination(t *testing.T) {
 			charts, releases, cleanup := newChartsAndReleases(t, tc.existingObjs)
 			s, mock, err := newServerWithChartsAndReleases(t, nil, charts, releases)
 			if err != nil {
-				t.Fatalf("%+v", err)
+				t.Fatal(err)
 			}
 			defer cleanup()
 
 			for _, existing := range tc.existingObjs {
-				ts2, repo, err := newRepoWithIndex(
+				ts2, repo, err := newHttpRepoAndServeIndex(
 					existing.repoIndex, existing.repoName, existing.repoNamespace, nil, "")
 				if err != nil {
-					t.Fatalf("%+v", err)
+					t.Fatal(err)
 				}
 				defer ts2.Close()
 
-				redisKey, bytes, err := s.redisKeyValueForRepo(*repo)
-				if err != nil {
-					t.Fatalf("%+v", err)
+				if err = s.redisMockExpectGetFromRepoCache(mock, nil, *repo); err != nil {
+					t.Fatal(err)
 				}
-
-				mock.ExpectGet(redisKey).SetVal(string(bytes))
 			}
 
-			response, err := s.GetInstalledPackageSummaries(context.Background(), tc.request)
+			response, err := s.GetInstalledPackageSummaries(context.Background(), connect.NewRequest(tc.request))
 
 			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
@@ -218,20 +247,7 @@ func TestGetInstalledPackageSummariesWithoutPagination(t *testing.T) {
 			if tc.expectedStatusCode != codes.OK {
 				return
 			}
-
-			opts := cmpopts.IgnoreUnexported(
-				corev1.GetInstalledPackageSummariesResponse{},
-				corev1.InstalledPackageSummary{},
-				corev1.InstalledPackageReference{},
-				corev1.Context{},
-				corev1.VersionReference{},
-				corev1.InstalledPackageStatus{},
-				corev1.PackageAppVersion{},
-				plugins.Plugin{})
-			opts2 := cmpopts.SortSlices(lessInstalledPackageSummaryFunc)
-			if got, want := response, tc.expectedResponse; !cmp.Equal(want, got, opts, opts2) {
-				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, opts, opts2))
-			}
+			compareInstalledPackageSummaries(t, response.Msg, tc.expectedResponse)
 
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Errorf("there were unfulfilled expectations: %s", err)
@@ -252,24 +268,21 @@ func TestGetInstalledPackageSummariesWithPagination(t *testing.T) {
 		charts, releases, cleanup := newChartsAndReleases(t, existingObjs)
 		s, mock, err := newServerWithChartsAndReleases(t, nil, charts, releases)
 		if err != nil {
-			t.Fatalf("%+v", err)
+			t.Fatal(err)
 		}
 		defer cleanup()
 
 		for _, existing := range existingObjs {
-			ts2, repo, err := newRepoWithIndex(
+			ts2, repo, err := newHttpRepoAndServeIndex(
 				existing.repoIndex, existing.repoName, existing.repoNamespace, nil, "")
 			if err != nil {
-				t.Fatalf("%+v", err)
+				t.Fatal(err)
 			}
 			defer ts2.Close()
 
-			redisKey, bytes, err := s.redisKeyValueForRepo(*repo)
-			if err != nil {
-				t.Fatalf("%+v", err)
+			if err = s.redisMockExpectGetFromRepoCache(mock, nil, *repo); err != nil {
+				t.Fatal(err)
 			}
-
-			mock.ExpectGet(redisKey).SetVal(string(bytes))
 		}
 
 		request1 := &corev1.GetInstalledPackageSummariesRequest{
@@ -279,13 +292,11 @@ func TestGetInstalledPackageSummariesWithPagination(t *testing.T) {
 				PageSize:  1,
 			},
 		}
-		response1, err := s.GetInstalledPackageSummaries(context.Background(), request1)
+		response1, err := s.GetInstalledPackageSummaries(context.Background(), connect.NewRequest(request1))
 
 		if got, want := status.Code(err), codes.OK; got != want {
 			t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 		}
-
-		t.Logf("got response: [%s]", response1.InstalledPackageSummaries[0].Name)
 
 		opts := cmpopts.IgnoreUnexported(
 			corev1.GetInstalledPackageSummariesResponse{},
@@ -313,11 +324,11 @@ func TestGetInstalledPackageSummariesWithPagination(t *testing.T) {
 
 		match := false
 		var nextExpectedResp *corev1.GetInstalledPackageSummariesResponse
-		if got, want := response1, expectedResp1; cmp.Equal(want, got, opts, opts2) {
+		if got, want := response1.Msg, expectedResp1; cmp.Equal(want, got, opts, opts2) {
 			match = true
 			nextExpectedResp = expectedResp2
 			nextExpectedResp.NextPageToken = "2"
-		} else if got, want := response1, expectedResp2; cmp.Equal(want, got, opts, opts2) {
+		} else if got, want := response1.Msg, expectedResp2; cmp.Equal(want, got, opts, opts2) {
 			match = true
 			nextExpectedResp = expectedResp1
 			nextExpectedResp.NextPageToken = "2"
@@ -334,12 +345,12 @@ func TestGetInstalledPackageSummariesWithPagination(t *testing.T) {
 			},
 		}
 
-		response2, err := s.GetInstalledPackageSummaries(context.Background(), request2)
+		response2, err := s.GetInstalledPackageSummaries(context.Background(), connect.NewRequest(request2))
 
 		if got, want := status.Code(err), codes.OK; got != want {
 			t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 		}
-		if got, want := response2, nextExpectedResp; !cmp.Equal(want, got, opts, opts2) {
+		if got, want := response2.Msg, nextExpectedResp; !cmp.Equal(want, got, opts, opts2) {
 			t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, opts, opts2))
 		}
 
@@ -356,14 +367,13 @@ func TestGetInstalledPackageSummariesWithPagination(t *testing.T) {
 			NextPageToken:             "",
 		}
 
-		response3, err := s.GetInstalledPackageSummaries(context.Background(), request3)
+		response3, err := s.GetInstalledPackageSummaries(context.Background(), connect.NewRequest(request3))
 
 		if got, want := status.Code(err), codes.OK; got != want {
 			t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 		}
-		if got, want := response3, nextExpectedResp; !cmp.Equal(want, got, opts, opts2) {
-			t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, opts, opts2))
-		}
+
+		compareInstalledPackageSummaries(t, response3.Msg, nextExpectedResp)
 
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("there were unfulfilled expectations: %s", err)
@@ -382,60 +392,56 @@ type helmReleaseStub struct {
 
 func TestGetInstalledPackageDetail(t *testing.T) {
 	testCases := []struct {
-		name               string
-		request            *corev1.GetInstalledPackageDetailRequest
-		existingK8sObjs    testSpecGetInstalledPackages
-		existingHelmStub   helmReleaseStub
-		expectedStatusCode codes.Code
-		expectedDetail     *corev1.InstalledPackageDetail
+		name              string
+		request           *corev1.GetInstalledPackageDetailRequest
+		existingK8sObjs   testSpecGetInstalledPackages
+		existingHelmStub  helmReleaseStub
+		expectedErrorCode connect.Code
+		expectedDetail    *corev1.InstalledPackageDetail
 	}{
 		{
 			name: "returns installed package detail when install fails",
 			request: &corev1.GetInstalledPackageDetailRequest{
 				InstalledPackageRef: my_redis_ref,
 			},
-			existingK8sObjs:    redis_existing_spec_failed,
-			existingHelmStub:   redis_existing_stub_failed,
-			expectedStatusCode: codes.OK,
-			expectedDetail:     redis_detail_failed,
+			existingK8sObjs:  redis_existing_spec_failed,
+			existingHelmStub: redis_existing_stub_failed,
+			expectedDetail:   redis_detail_failed,
 		},
 		{
 			name: "returns installed package detail when install is in progress",
 			request: &corev1.GetInstalledPackageDetailRequest{
 				InstalledPackageRef: my_redis_ref,
 			},
-			existingK8sObjs:    redis_existing_spec_pending,
-			existingHelmStub:   redis_existing_stub_pending,
-			expectedStatusCode: codes.OK,
-			expectedDetail:     redis_detail_pending,
+			existingK8sObjs:  redis_existing_spec_pending,
+			existingHelmStub: redis_existing_stub_pending,
+			expectedDetail:   redis_detail_pending,
 		},
 		{
 			name: "returns installed package detail when install is successful",
 			request: &corev1.GetInstalledPackageDetailRequest{
 				InstalledPackageRef: my_redis_ref,
 			},
-			existingK8sObjs:    redis_existing_spec_completed,
-			existingHelmStub:   redis_existing_stub_completed,
-			expectedStatusCode: codes.OK,
-			expectedDetail:     redis_detail_completed,
+			existingK8sObjs:  redis_existing_spec_completed,
+			existingHelmStub: redis_existing_stub_completed,
+			expectedDetail:   redis_detail_completed,
 		},
 		{
 			name: "returns a 404 if the installed package is not found",
 			request: &corev1.GetInstalledPackageDetailRequest{
 				InstalledPackageRef: installedRef("dontworrybehappy", "namespace-1"),
 			},
-			existingK8sObjs:    redis_existing_spec_completed,
-			expectedStatusCode: codes.NotFound,
+			existingK8sObjs:   redis_existing_spec_completed,
+			expectedErrorCode: connect.CodeNotFound,
 		},
 		{
 			name: "returns values and reconciliation options in package detail",
 			request: &corev1.GetInstalledPackageDetailRequest{
 				InstalledPackageRef: my_redis_ref,
 			},
-			existingK8sObjs:    redis_existing_spec_completed_with_values_and_reconciliation_options,
-			existingHelmStub:   redis_existing_stub_completed,
-			expectedStatusCode: codes.OK,
-			expectedDetail:     redis_detail_completed_with_values_and_reconciliation_options,
+			existingK8sObjs:  redis_existing_spec_completed_with_values_and_reconciliation_options,
+			existingHelmStub: redis_existing_stub_completed,
+			expectedDetail:   redis_detail_completed_with_values_and_reconciliation_options,
 		},
 		{
 			// see https://github.com/vmware-tanzu/kubeapps/issues/4189 for discussion
@@ -445,10 +451,9 @@ func TestGetInstalledPackageDetail(t *testing.T) {
 			request: &corev1.GetInstalledPackageDetailRequest{
 				InstalledPackageRef: my_redis_ref,
 			},
-			existingK8sObjs:    redis_existing_spec_target_ns_is_set,
-			existingHelmStub:   redis_existing_stub_target_ns_is_set,
-			expectedStatusCode: codes.OK,
-			expectedDetail:     redis_detail_completed,
+			existingK8sObjs:  redis_existing_spec_target_ns_is_set,
+			existingHelmStub: redis_existing_stub_target_ns_is_set,
+			expectedDetail:   redis_detail_completed,
 		},
 	}
 
@@ -459,23 +464,23 @@ func TestGetInstalledPackageDetail(t *testing.T) {
 			helmReleaseNamespace := tc.existingK8sObjs.targetNamespace
 			if helmReleaseNamespace == "" {
 				// this would be most cases now
-				helmReleaseNamespace = tc.existingK8sObjs.releaseNamespace
+				helmReleaseNamespace = tc.existingK8sObjs.releaseMeta.Namespace
 			}
 			actionConfig := newHelmActionConfig(
 				t, helmReleaseNamespace, []helmReleaseStub{tc.existingHelmStub})
 			s, mock, err := newServerWithChartsAndReleases(t, actionConfig, charts, repos)
 			if err != nil {
-				t.Fatalf("%+v", err)
+				t.Fatal(err)
 			}
 
-			response, err := s.GetInstalledPackageDetail(context.Background(), tc.request)
+			response, err := s.GetInstalledPackageDetail(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 			}
 
 			// We don't need to check anything else for non-OK codes.
-			if tc.expectedStatusCode != codes.OK {
+			if tc.expectedErrorCode != 0 {
 				return
 			}
 
@@ -483,7 +488,7 @@ func TestGetInstalledPackageDetail(t *testing.T) {
 				InstalledPackageDetail: tc.expectedDetail,
 			}
 
-			compareActualVsExpectedGetInstalledPackageDetailResponse(t, response, expectedResp)
+			compareInstalledPackageDetail(t, response.Msg, expectedResp)
 
 			// we make sure that all expectations were met
 			if err := mock.ExpectationsWereMet(); err != nil {
@@ -506,7 +511,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 		existingObjs            testSpecCreateInstalledPackage
 		expectedStatusCode      codes.Code
 		expectedResponse        *corev1.CreateInstalledPackageResponse
-		expectedRelease         *helmv2.HelmRelease
+		expectedRelease         *helmv2beta2.HelmRelease
 		defaultUpgradePolicyStr string
 	}{
 		{
@@ -625,24 +630,21 @@ func TestCreateInstalledPackage(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			ts, repo, err := newRepoWithIndex(
+			ts, repo, err := newHttpRepoAndServeIndex(
 				tc.existingObjs.repoIndex, tc.existingObjs.repoName, tc.existingObjs.repoNamespace, nil, "")
 			if err != nil {
-				t.Fatalf("%+v", err)
+				t.Fatal(err)
 			}
 			defer ts.Close()
 
-			s, mock, err := newSimpleServerWithRepos(t, []sourcev1.HelmRepository{*repo})
+			s, mock, err := newSimpleServerWithRepos(t, []sourcev1beta2.HelmRepository{*repo})
 			if err != nil {
-				t.Fatalf("%+v", err)
+				t.Fatal(err)
 			}
 
-			redisKey, bytes, err := s.redisKeyValueForRepo(*repo)
-			if err != nil {
-				t.Fatalf("%+v", err)
+			if err = s.redisMockExpectGetFromRepoCache(mock, nil, *repo); err != nil {
+				t.Fatal(err)
 			}
-
-			mock.ExpectGet(redisKey).SetVal(string(bytes))
 
 			if tc.defaultUpgradePolicyStr != "" {
 				policy, err := pkgutils.UpgradePolicyFromString(tc.defaultUpgradePolicyStr)
@@ -653,7 +655,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 				}
 			}
 
-			response, err := s.CreateInstalledPackage(context.Background(), tc.request)
+			response, err := s.CreateInstalledPackage(context.Background(), connect.NewRequest(tc.request))
 
 			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
@@ -670,7 +672,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 				plugins.Plugin{},
 				corev1.Context{})
 
-			if got, want := response, tc.expectedResponse; !cmp.Equal(want, got, opts) {
+			if got, want := response.Msg, tc.expectedResponse; !cmp.Equal(want, got, opts) {
 				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, opts))
 			}
 
@@ -679,17 +681,21 @@ func TestCreateInstalledPackage(t *testing.T) {
 				t.Errorf("there were unfulfilled expectations: %s", err)
 			}
 
-			// check expected HelmReleass CRD has been created
-			if ctrlClient, err := s.clientGetter.ControllerRuntime(context.Background(), s.kubeappsCluster); err != nil {
+			// check expected HelmReleases CRD has been created
+			if ctrlClient, err := s.clientGetter.ControllerRuntime(http.Header{}, s.kubeappsCluster); err != nil {
 				t.Fatal(err)
 			} else {
 				key := types.NamespacedName{Namespace: tc.request.TargetContext.Namespace, Name: tc.request.Name}
-				var actualRel helmv2.HelmRelease
+				var actualRel helmv2beta2.HelmRelease
 				if err = ctrlClient.Get(context.Background(), key, &actualRel); err != nil {
 					t.Fatal(err)
 				} else {
 					// Values are JSON string and need to be compared as such
-					opts = cmpopts.IgnoreFields(helmv2.HelmReleaseSpec{}, "Values")
+					opts = cmpopts.IgnoreFields(helmv2beta2.HelmReleaseSpec{}, "Values")
+
+					// Manually setting TypeMeta, as the fakeclient doesn't do it anymore:
+					// https://github.com/kubernetes-sigs/controller-runtime/pull/2633
+					actualRel.TypeMeta = tc.expectedRelease.TypeMeta
 
 					if got, want := &actualRel, tc.expectedRelease; !cmp.Equal(want, got, opts) {
 						t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, opts))
@@ -706,9 +712,9 @@ func TestUpdateInstalledPackage(t *testing.T) {
 		name                    string
 		request                 *corev1.UpdateInstalledPackageRequest
 		existingK8sObjs         *testSpecGetInstalledPackages
-		expectedStatusCode      codes.Code
+		expectedErrorCode       connect.Code
 		expectedResponse        *corev1.UpdateInstalledPackageResponse
-		expectedRelease         *helmv2.HelmRelease
+		expectedRelease         *helmv2beta2.HelmRelease
 		defaultUpgradePolicyStr string
 	}{
 		{
@@ -719,8 +725,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 					Version: ">14.4.0",
 				},
 			},
-			existingK8sObjs:    &redis_existing_spec_completed,
-			expectedStatusCode: codes.OK,
+			existingK8sObjs: &redis_existing_spec_completed,
 			expectedResponse: &corev1.UpdateInstalledPackageResponse{
 				InstalledPackageRef: my_redis_ref,
 			},
@@ -731,7 +736,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 			request: &corev1.UpdateInstalledPackageRequest{
 				InstalledPackageRef: installedRef("not-a-valid-identifier", "default"),
 			},
-			expectedStatusCode: codes.NotFound,
+			expectedErrorCode: connect.CodeNotFound,
 		},
 		{
 			// see https://github.com/vmware-tanzu/kubeapps/issues/4189 for discussion
@@ -744,8 +749,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 					Version: ">14.4.0",
 				},
 			},
-			existingK8sObjs:    &redis_existing_spec_target_ns_is_set,
-			expectedStatusCode: codes.OK,
+			existingK8sObjs: &redis_existing_spec_target_ns_is_set,
 			expectedResponse: &corev1.UpdateInstalledPackageResponse{
 				InstalledPackageRef: my_redis_ref,
 			},
@@ -757,8 +761,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 				InstalledPackageRef: my_redis_ref,
 				Values:              "{\"ui\": { \"message\": \"what we do in the shadows\" } }",
 			},
-			existingK8sObjs:    &redis_existing_spec_completed,
-			expectedStatusCode: codes.OK,
+			existingK8sObjs: &redis_existing_spec_completed,
 			expectedResponse: &corev1.UpdateInstalledPackageResponse{
 				InstalledPackageRef: my_redis_ref,
 			},
@@ -770,8 +773,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 				InstalledPackageRef: my_redis_ref,
 				Values:              "# Default values.\n---\nui:\n  message: what we do in the shadows",
 			},
-			existingK8sObjs:    &redis_existing_spec_completed,
-			expectedStatusCode: codes.OK,
+			existingK8sObjs: &redis_existing_spec_completed,
 			expectedResponse: &corev1.UpdateInstalledPackageResponse{
 				InstalledPackageRef: my_redis_ref,
 			},
@@ -785,8 +787,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 					Version: "14.4.0",
 				},
 			},
-			existingK8sObjs:    &redis_existing_spec_completed,
-			expectedStatusCode: codes.OK,
+			existingK8sObjs: &redis_existing_spec_completed,
 			expectedResponse: &corev1.UpdateInstalledPackageResponse{
 				InstalledPackageRef: my_redis_ref,
 			},
@@ -801,8 +802,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 					Version: "14.4.0",
 				},
 			},
-			existingK8sObjs:    &redis_existing_spec_completed,
-			expectedStatusCode: codes.OK,
+			existingK8sObjs: &redis_existing_spec_completed,
 			expectedResponse: &corev1.UpdateInstalledPackageResponse{
 				InstalledPackageRef: my_redis_ref,
 			},
@@ -817,8 +817,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 					Version: "14.4.0",
 				},
 			},
-			existingK8sObjs:    &redis_existing_spec_completed,
-			expectedStatusCode: codes.OK,
+			existingK8sObjs: &redis_existing_spec_completed,
 			expectedResponse: &corev1.UpdateInstalledPackageResponse{
 				InstalledPackageRef: my_redis_ref,
 			},
@@ -833,8 +832,8 @@ func TestUpdateInstalledPackage(t *testing.T) {
 					Version: "14.4.0",
 				},
 			},
-			existingK8sObjs:    &redis_existing_spec_pending,
-			expectedStatusCode: codes.Internal,
+			existingK8sObjs:   &redis_existing_spec_pending,
+			expectedErrorCode: connect.CodeInternal,
 		},
 
 		// test case update installed package that has failed reconciliation will be done
@@ -851,7 +850,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 			defer cleanup()
 			s, mock, err := newServerWithChartsAndReleases(t, nil, charts, releases)
 			if err != nil {
-				t.Fatalf("%+v", err)
+				t.Fatal(err)
 			}
 
 			if tc.defaultUpgradePolicyStr != "" {
@@ -863,14 +862,14 @@ func TestUpdateInstalledPackage(t *testing.T) {
 				}
 			}
 
-			response, err := s.UpdateInstalledPackage(context.Background(), tc.request)
+			response, err := s.UpdateInstalledPackage(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 			}
 
 			// We don't need to check anything else for non-OK codes.
-			if tc.expectedStatusCode != codes.OK {
+			if tc.expectedErrorCode != 0 {
 				return
 			}
 
@@ -880,7 +879,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 				plugins.Plugin{},
 				corev1.Context{})
 
-			if got, want := response, tc.expectedResponse; !cmp.Equal(want, got, opts) {
+			if got, want := response.Msg, tc.expectedResponse; !cmp.Equal(want, got, opts) {
 				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, opts))
 			}
 
@@ -895,15 +894,19 @@ func TestUpdateInstalledPackage(t *testing.T) {
 				Name:      tc.expectedResponse.InstalledPackageRef.Identifier,
 			}
 			ctx := context.Background()
-			var actualRel helmv2.HelmRelease
-			if ctrlClient, err := s.clientGetter.ControllerRuntime(ctx, s.kubeappsCluster); err != nil {
+			var actualRel helmv2beta2.HelmRelease
+			if ctrlClient, err := s.clientGetter.ControllerRuntime(http.Header{}, s.kubeappsCluster); err != nil {
 				t.Fatal(err)
 			} else if err = ctrlClient.Get(ctx, key, &actualRel); err != nil {
 				t.Fatal(err)
 			}
 
 			// Values are JSON string and need to be compared as such
-			opts = cmpopts.IgnoreFields(helmv2.HelmReleaseSpec{}, "Values")
+			opts = cmpopts.IgnoreFields(helmv2beta2.HelmReleaseSpec{}, "Values")
+
+			// Manually setting TypeMeta, as the fakeclient doesn't do it anymore:
+			// https://github.com/kubernetes-sigs/controller-runtime/pull/2633
+			actualRel.TypeMeta = tc.expectedRelease.TypeMeta
 
 			if got, want := &actualRel, tc.expectedRelease; !cmp.Equal(want, got, opts) {
 				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, opts))
@@ -915,11 +918,11 @@ func TestUpdateInstalledPackage(t *testing.T) {
 
 func TestDeleteInstalledPackage(t *testing.T) {
 	testCases := []struct {
-		name               string
-		request            *corev1.DeleteInstalledPackageRequest
-		existingK8sObjs    []testSpecGetInstalledPackages
-		expectedStatusCode codes.Code
-		expectedResponse   *corev1.DeleteInstalledPackageResponse
+		name              string
+		request           *corev1.DeleteInstalledPackageRequest
+		existingK8sObjs   []testSpecGetInstalledPackages
+		expectedErrorCode connect.Code
+		expectedResponse  *corev1.DeleteInstalledPackageResponse
 	}{
 		{
 			name: "delete package",
@@ -929,8 +932,7 @@ func TestDeleteInstalledPackage(t *testing.T) {
 			existingK8sObjs: []testSpecGetInstalledPackages{
 				redis_existing_spec_completed,
 			},
-			expectedStatusCode: codes.OK,
-			expectedResponse:   &corev1.DeleteInstalledPackageResponse{},
+			expectedResponse: &corev1.DeleteInstalledPackageResponse{},
 		},
 		{
 			name: "returns not found if installed package doesn't exist",
@@ -942,7 +944,7 @@ func TestDeleteInstalledPackage(t *testing.T) {
 					Identifier: "not-a-valid-identifier",
 				},
 			},
-			expectedStatusCode: codes.NotFound,
+			expectedErrorCode: connect.CodeNotFound,
 		},
 	}
 
@@ -952,23 +954,23 @@ func TestDeleteInstalledPackage(t *testing.T) {
 			defer cleanup()
 			s, mock, err := newServerWithChartsAndReleases(t, nil, charts, repos)
 			if err != nil {
-				t.Fatalf("%+v", err)
+				t.Fatal(err)
 			}
 
-			response, err := s.DeleteInstalledPackage(context.Background(), tc.request)
+			response, err := s.DeleteInstalledPackage(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 			}
 
 			// We don't need to check anything else for non-OK codes.
-			if tc.expectedStatusCode != codes.OK {
+			if tc.expectedErrorCode != 0 {
 				return
 			}
 
 			opts := cmpopts.IgnoreUnexported(corev1.DeleteInstalledPackageResponse{})
 
-			if got, want := response, tc.expectedResponse; !cmp.Equal(want, got, opts) {
+			if got, want := response.Msg, tc.expectedResponse; !cmp.Equal(want, got, opts) {
 				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, opts))
 			}
 
@@ -983,8 +985,8 @@ func TestDeleteInstalledPackage(t *testing.T) {
 				Name:      tc.request.InstalledPackageRef.Identifier,
 			}
 			ctx := context.Background()
-			var actualRel helmv2.HelmRelease
-			if ctrlClient, err := s.clientGetter.ControllerRuntime(ctx, s.kubeappsCluster); err != nil {
+			var actualRel helmv2beta2.HelmRelease
+			if ctrlClient, err := s.clientGetter.ControllerRuntime(http.Header{}, s.kubeappsCluster); err != nil {
 				t.Fatal(err)
 			} else if err = ctrlClient.Get(ctx, key, &actualRel); !errors.IsNotFound(err) {
 				t.Errorf("mismatch expected, NotFound, got %+v", err)
@@ -1003,22 +1005,22 @@ func TestGetInstalledPackageResourceRefs(t *testing.T) {
 		baseTestCase       resourcerefstest.TestCase
 		request            *corev1.GetInstalledPackageResourceRefsRequest
 		expectedResponse   *corev1.GetInstalledPackageResourceRefsResponse
-		expectedStatusCode codes.Code
+		expectedErrorCode  connect.Code
 		targetNamespaceSet bool
 	}
 
 	// Using the redis_existing_stub_completed data with
 	// different manifests for each test.
 	var (
-		flux_obj_namespace = redis_existing_spec_completed.releaseNamespace
-		flux_obj_name      = redis_existing_spec_completed.releaseName
+		flux_obj_namespace = redis_existing_spec_completed.releaseMeta.Namespace
+		flux_obj_name      = redis_existing_spec_completed.releaseMeta.Name
 	)
 
 	// newTestCase is a function to take an existing test-case
 	// (a so-called baseTestCase in pkg/resourcerefs module, which contains a LOT of useful data)
 	// and "enrich" it with some new fields to create a different kind of test case
 	// that tests server.GetInstalledPackageResourceRefs() func
-	newTestCase := func(tc int, response bool, code codes.Code, targetNamespaceSet bool) testCase {
+	newTestCase := func(tc int, response bool, code connect.Code, targetNamespaceSet bool) testCase {
 		newCase := testCase{
 			baseTestCase: resourcerefstest.TestCases2[tc],
 			request: &corev1.GetInstalledPackageResourceRefsRequest{
@@ -1040,29 +1042,29 @@ func TestGetInstalledPackageResourceRefs(t *testing.T) {
 				ResourceRefs: resourcerefstest.TestCases2[tc].ExpectedResourceRefs,
 			}
 		}
-		newCase.expectedStatusCode = code
+		newCase.expectedErrorCode = code
 		newCase.targetNamespaceSet = targetNamespaceSet
 		return newCase
 	}
 
 	testCases := []testCase{
-		newTestCase(0, true, codes.OK, false),
-		newTestCase(1, true, codes.OK, false),
-		newTestCase(2, true, codes.OK, false),
-		newTestCase(3, true, codes.OK, false),
-		newTestCase(4, false, codes.NotFound, false),
-		newTestCase(5, false, codes.Internal, false),
+		newTestCase(0, true, 0, false),
+		newTestCase(1, true, 0, false),
+		newTestCase(2, true, 0, false),
+		newTestCase(3, true, 0, false),
+		newTestCase(4, false, connect.CodeNotFound, false),
+		newTestCase(5, false, connect.CodeInternal, false),
 		// See https://github.com/vmware-tanzu/kubeapps/issues/632
-		newTestCase(6, true, codes.OK, false),
-		newTestCase(7, true, codes.OK, false),
-		newTestCase(8, true, codes.OK, false),
+		newTestCase(6, true, 0, false),
+		newTestCase(7, true, 0, false),
+		newTestCase(8, true, 0, false),
 		// See https://kubernetes.io/docs/reference/kubernetes-api/authorization-resources/role-v1/#RoleList
-		newTestCase(9, true, codes.OK, false),
-		newTestCase(10, true, codes.OK, false),
+		newTestCase(9, true, 0, false),
+		newTestCase(10, true, 0, false),
 		// see https://github.com/vmware-tanzu/kubeapps/issues/4189 for discussion
 		// this is testing a configuration where a customer has manually set a
 		// .targetNamespace field of Flux HelmRelease CR
-		newTestCase(11, true, codes.OK, true),
+		newTestCase(11, true, 0, true),
 	}
 
 	ignoredFields := cmpopts.IgnoreUnexported(
@@ -1103,16 +1105,19 @@ func TestGetInstalledPackageResourceRefs(t *testing.T) {
 				toHelmReleaseStubs(tc.baseTestCase.ExistingReleases))
 			server, mock, err := newServerWithChartsAndReleases(t, actionConfig, charts, releases)
 			if err != nil {
-				t.Fatalf("%+v", err)
+				t.Fatal(err)
 			}
 
-			response, err := server.GetInstalledPackageResourceRefs(context.Background(), tc.request)
+			response, err := server.GetInstalledPackageResourceRefs(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 			}
+			if tc.expectedErrorCode != 0 {
+				return
+			}
 
-			if got, want := response, tc.expectedResponse; !cmp.Equal(want, got, ignoredFields) {
+			if got, want := response.Msg, tc.expectedResponse; !cmp.Equal(want, got, ignoredFields) {
 				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoredFields))
 			}
 
@@ -1124,47 +1129,50 @@ func TestGetInstalledPackageResourceRefs(t *testing.T) {
 	}
 }
 
-func newChartsAndReleases(t *testing.T, existingK8sObjs []testSpecGetInstalledPackages) (charts []sourcev1.HelmChart, releases []helmv2.HelmRelease, cleanup func()) {
+func newChartsAndReleases(t *testing.T, existingK8sObjs []testSpecGetInstalledPackages) (charts []sourcev1beta2.HelmChart, releases []helmv2beta2.HelmRelease, cleanup func()) {
 	httpServers := []*httptest.Server{}
 	cleanup = func() {
 		for _, ts := range httpServers {
 			ts.Close()
 		}
 	}
-	charts = []sourcev1.HelmChart{}
-	releases = []helmv2.HelmRelease{}
+	charts = []sourcev1beta2.HelmChart{}
+	releases = []helmv2beta2.HelmRelease{}
 
 	for _, existing := range existingK8sObjs {
-		tarGzBytes, err := ioutil.ReadFile(existing.chartTarGz)
+		tarGzBytes, err := os.ReadFile(existing.chartTarGz)
 		if err != nil {
-			t.Fatalf("%+v", err)
+			t.Fatal(err)
 		}
 
 		// stand up an http server just for the duration of this test
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(200)
-			w.Write(tarGzBytes)
+			_, err = w.Write(tarGzBytes)
+			if err != nil {
+				t.Fatal(err)
+			}
 		}))
 		httpServers = append(httpServers, ts)
 
-		chartSpec := &sourcev1.HelmChartSpec{
+		chartSpec := &sourcev1beta2.HelmChartSpec{
 			Chart: existing.chartName,
-			SourceRef: sourcev1.LocalHelmChartSourceReference{
+			SourceRef: sourcev1beta2.LocalHelmChartSourceReference{
 				Name: existing.repoName,
-				Kind: sourcev1.HelmRepositoryKind,
+				Kind: sourcev1beta2.HelmRepositoryKind,
 			},
 			Version:  existing.chartSpecVersion,
 			Interval: metav1.Duration{Duration: 1 * time.Minute},
 		}
 
-		chartStatus := &sourcev1.HelmChartStatus{
+		chartStatus := &sourcev1beta2.HelmChartStatus{
 			Conditions: []metav1.Condition{
 				{
 					LastTransitionTime: metav1.Time{Time: lastTransitionTime},
 					Message:            "Fetched revision: " + existing.chartSpecVersion,
 					Type:               fluxmeta.ReadyCondition,
 					Status:             metav1.ConditionTrue,
-					Reason:             sourcev1.ChartPullSucceededReason,
+					Reason:             sourcev1beta2.ChartPullSucceededReason,
 				},
 			},
 			Artifact: &sourcev1.Artifact{
@@ -1175,14 +1183,14 @@ func newChartsAndReleases(t *testing.T, existingK8sObjs []testSpecGetInstalledPa
 		chart := newChart(existing.chartName, existing.repoNamespace, chartSpec, chartStatus)
 		charts = append(charts, chart)
 
-		releaseSpec := &helmv2.HelmReleaseSpec{
-			Chart: helmv2.HelmChartTemplate{
-				Spec: helmv2.HelmChartTemplateSpec{
+		releaseSpec := &helmv2beta2.HelmReleaseSpec{
+			Chart: helmv2beta2.HelmChartTemplate{
+				Spec: helmv2beta2.HelmChartTemplateSpec{
 					Chart:   existing.chartName,
 					Version: existing.chartSpecVersion,
-					SourceRef: helmv2.CrossNamespaceObjectReference{
+					SourceRef: helmv2beta2.CrossNamespaceObjectReference{
 						Name:      existing.repoName,
-						Kind:      sourcev1.HelmRepositoryKind,
+						Kind:      sourcev1beta2.HelmRepositoryKind,
 						Namespace: existing.repoNamespace,
 					},
 				},
@@ -1203,46 +1211,15 @@ func newChartsAndReleases(t *testing.T, existingK8sObjs []testSpecGetInstalledPa
 			releaseSpec.ServiceAccountName = existing.releaseServiceAccountName
 		}
 
-		release := newRelease(existing.releaseName, existing.releaseNamespace, releaseSpec, &existing.releaseStatus)
+		release := newRelease(existing.releaseMeta, releaseSpec, &existing.releaseStatus)
 		releases = append(releases, release)
 	}
 	return charts, releases, cleanup
 }
 
-func compareActualVsExpectedGetInstalledPackageDetailResponse(t *testing.T, actualResp *corev1.GetInstalledPackageDetailResponse, expectedResp *corev1.GetInstalledPackageDetailResponse) {
-	opts := cmpopts.IgnoreUnexported(
-		corev1.GetInstalledPackageDetailResponse{},
-		corev1.InstalledPackageDetail{},
-		corev1.InstalledPackageReference{},
-		corev1.Context{},
-		corev1.VersionReference{},
-		corev1.InstalledPackageStatus{},
-		corev1.PackageAppVersion{},
-		plugins.Plugin{},
-		corev1.ReconciliationOptions{},
-		corev1.AvailablePackageReference{})
-	// see comment in release_integration_test.go. Intermittently we get an inconsistent error message from flux
-	opts2 := cmpopts.IgnoreFields(corev1.InstalledPackageStatus{}, "UserReason")
-	// Values Applied are JSON string and need to be compared as such
-	opts3 := cmpopts.IgnoreFields(corev1.InstalledPackageDetail{}, "ValuesApplied")
-	if got, want := actualResp, expectedResp; !cmp.Equal(want, got, opts, opts2, opts3) {
-		t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, opts, opts2, opts3))
-	}
-	if !strings.Contains(actualResp.InstalledPackageDetail.Status.UserReason, expectedResp.InstalledPackageDetail.Status.UserReason) {
-		t.Errorf("substring mismatch (-want: %s\n+got: %s):\n", expectedResp.InstalledPackageDetail.Status.UserReason, actualResp.InstalledPackageDetail.Status.UserReason)
-	}
-	compareJSONStrings(t, expectedResp.InstalledPackageDetail.ValuesApplied, actualResp.InstalledPackageDetail.ValuesApplied)
-}
-
-func newRelease(name string, namespace string, spec *helmv2.HelmReleaseSpec, status *helmv2.HelmReleaseStatus) helmv2.HelmRelease {
-	helmRelease := helmv2.HelmRelease{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       name,
-			Generation: int64(1),
-		},
-	}
-	if namespace != "" {
-		helmRelease.ObjectMeta.Namespace = namespace
+func newRelease(meta metav1.ObjectMeta, spec *helmv2beta2.HelmReleaseSpec, status *helmv2beta2.HelmReleaseStatus) helmv2beta2.HelmRelease {
+	helmRelease := helmv2beta2.HelmRelease{
+		ObjectMeta: meta,
 	}
 
 	if spec != nil {
@@ -1251,7 +1228,6 @@ func newRelease(name string, namespace string, spec *helmv2.HelmReleaseSpec, sta
 
 	if status != nil {
 		helmRelease.Status = *status.DeepCopy()
-		helmRelease.Status.ObservedGeneration = int64(1)
 	}
 	return helmRelease
 }

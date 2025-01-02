@@ -1,6 +1,7 @@
-# Copyright 2021-2022 the Kubeapps contributors.
+# Copyright 2021-2024 the Kubeapps contributors.
 # SPDX-License-Identifier: Apache-2.0
 
+---
 openapi: 3.0.3
 servers:
   - url: "{schema}://{url}:{port}"
@@ -20,15 +21,15 @@ servers:
         description: Kubeapps port
 info:
   description: >
-    [![CircleCI](https://circleci.com/gh/vmware-tanzu/kubeapps/tree/main.svg?style=svg)](https://circleci.com/gh/vmware-tanzu/kubeapps/tree/main)
+    [![Main Pipeline](https://github.com/vmware-tanzu/kubeapps/actions/workflows/kubeapps-main.yaml/badge.svg)](https://github.com/vmware-tanzu/kubeapps/actions/workflows/kubeapps-main.yaml)
 
      [Kubeapps](https://github.com/vmware-tanzu/kubeapps) is a web-based UI for deploying and managing applications in Kubernetes clusters.
 
      Note: this API documentation is still in an initial stage and is subject to change. Before coupling to it, please [drop us an issue](https://github.com/vmware-tanzu/kubeapps/issues/new/choose) or reach us [via Slack](https://kubernetes.slack.com/messages/kubeapps) to know more about your use case and see how we can assist you.
      #### Developer Documentation
-     - The [Kubeapps architecture overview](https://github.com/vmware-tanzu/kubeapps/blob/main/site/content/docs/latest/background/architecture.md).
-     - The [Kubeapps Developer Documentation](https://github.com/vmware-tanzu/kubeapps/blob/main/site/content/docs/latest/reference/developer/README.md) for instructions on setting up the developer environment for developing on Kubeapps and its components.
-     - The [Kubeapps Build Guide](https://github.com/vmware-tanzu/kubeapps/blob/main/site/content/docs/latest/reference/developer/build.md) for instructions on setting up the build environment and building Kubeapps from source.
+     - The [Kubeapps Architecture Overview](https://kubeapps.dev/docs/latest/background/architecture/).
+     - The [Kubeapps Developer Documentation](https://kubeapps.dev/docs/latest/reference/developer/) for instructions on setting up the developer environment for developing on Kubeapps and its components.
+     - The [Kubeapps Build Guide](https://kubeapps.dev/docs/latest/reference/developer/build/) for instructions on setting up the build environment and building Kubeapps from source.
   version: 0.1.0
   title: Kubeapps API
   termsOfService: "https://github.com/vmware-tanzu/kubeapps/blob/main/LICENSE"
@@ -36,10 +37,6 @@ info:
     name: Apache-2.0
     url: "http://www.apache.org/licenses/LICENSE-2.0.html"
 tags:
-  - name: kubeops
-    externalDocs:
-      url: "https://github.com/vmware-tanzu/kubeapps/tree/main/cmd/kubeops"
-    description: "The kubeops component is a micro-service that creates an API endpoint for accessing the Helm API and Kubernetes resources."
   - name: PluginsService
   - name: PackagesService
   - name: RepositoriesService
@@ -56,795 +53,7 @@ externalDocs:
 security:
   - bearerAuth: []
 paths:
-  # Endpoints defined at pkg/http-handler/http-handler.go
-  "/api/v1/clusters/{cluster}/can-i":
-    post:
-      tags:
-        - kubeops
-      summary: "CanI"
-      description: ""
-      operationId: "CanI"
-      parameters:
-        - name: cluster
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Cluster name
-      requestBody:
-        description: ""
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ResourceAttributes"
-      responses:
-        default:
-          description: Default code/message response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "200":
-          description: Successful response
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/AllowedResponse"
-        "401":
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "500":
-          description: Internal server error
-          content:
-            text/plain:
-              schema:
-                type: string
-  "/api/v1/clusters/{cluster}/namespaces":
-    get:
-      tags:
-        - kubeops
-      summary: "GetNamespaces"
-      description: ""
-      operationId: "GetNamespaces"
-      parameters:
-        - name: cluster
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Cluster name
-      responses:
-        default:
-          description: Default code/message response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "200":
-          description: Successful response
-          content:
-            text/plain:
-              schema:
-                type: object
-                properties:
-                  namespaces:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/Namespace"
-        "401":
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-  "/api/v1/clusters/{cluster}/apprepositories":
-    get:
-      tags:
-        - kubeops
-      summary: "ListAppRepositories"
-      description: ""
-      operationId: "ListAppRepositories"
-      parameters:
-        - name: cluster
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Cluster name
-      responses:
-        default:
-          description: Default code/message response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "200":
-          description: Successful response
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/AppRepositoryResponse"
-        "401":
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-  "/api/v1/clusters/{cluster}/namespaces/{namespace}/apprepositories":
-    get:
-      tags:
-        - kubeops
-      summary: "ListAppRepositories_ns"
-      description: ""
-      operationId: "ListAppRepositories_ns"
-      parameters:
-        - name: cluster
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Cluster name
-        - name: namespace
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Namespace name
-      responses:
-        default:
-          description: Default code/message response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "200":
-          description: Successful response
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/AppRepositoryResponse"
-        "401":
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-    post:
-      tags:
-        - kubeops
-      summary: "CreateAppRepository"
-      description: ""
-      operationId: "CreateAppRepository"
-      parameters:
-        - name: cluster
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Cluster name
-        - name: namespace
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Namespace name
-      requestBody:
-        description: ""
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/AppRepositoryRequest"
-      responses:
-        default:
-          description: Default code/message response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "200":
-          description: Successful response
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/AppRepositoryResponse"
-        "401":
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "422":
-          description: Unprocessable entity
-  "/api/v1/clusters/{cluster}/namespaces/{namespace}/apprepositories/validate":
-    post:
-      tags:
-        - kubeops
-      summary: "ValidateAppRepository"
-      description: ""
-      operationId: "ValidateAppRepository"
-      parameters:
-        - name: cluster
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Cluster name
-        - name: namespace
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Namespace name
-      requestBody:
-        description: ""
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/AppRepository"
-      responses:
-        default:
-          description: Default code/message response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "200":
-          description: Successful response
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/ValidationResponse"
-        "401":
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-  "/api/v1/clusters/{cluster}/namespaces/{namespace}/apprepositories/{name}":
-    put:
-      tags:
-        - kubeops
-      summary: "UpdateAppRepository"
-      description: ""
-      operationId: "UpdateAppRepository"
-      parameters:
-        - name: cluster
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Cluster name
-        - name: namespace
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Namespace name
-        - name: name
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Apprepository name
-      requestBody:
-        description: ""
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/AppRepositoryRequest"
-      responses:
-        default:
-          description: Default code/message response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "200":
-          description: Successful response
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/AppRepositoryResponse"
-        "401":
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-    delete:
-      tags:
-        - kubeops
-      summary: "DeleteAppRepository"
-      description: ""
-      operationId: "DeleteAppRepository"
-      parameters:
-        - name: cluster
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Cluster name
-        - name: namespace
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Namespace name
-        - name: name
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Apprepository name
-      responses:
-        "404":
-          description: Not found
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "401":
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "500":
-          description: Internal server error
-          content:
-            text/plain:
-              schema:
-                type: string
-  "/api/v1/clusters/{cluster}/namespaces/{namespace}/apprepositories/{name}/refresh":
-    post:
-      tags:
-        - kubeops
-      summary: "RefreshAppRepository"
-      description: ""
-      operationId: "RefreshAppRepository"
-      parameters:
-        - name: cluster
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Cluster name
-        - name: namespace
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Namespace name
-        - name: name
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Apprepository name
-      responses:
-        default:
-          description: Default code/message response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "200":
-          description: Successful response
-          content:
-            text/plain:
-              schema:
-                $ref: "#/components/schemas/AppRepositoryResponse"
-        "401":
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-  "/api/v1/clusters/{cluster}/namespaces/{namespace}/operator/{name}/logo":
-    get:
-      tags:
-        - kubeops
-      summary: "GetOperatorLogo"
-      description: ""
-      operationId: "GetOperatorLogo"
-      parameters:
-        - name: cluster
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Cluster name
-        - name: namespace
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Namespace name
-        - name: name
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Apprepository name
-      responses:
-        default:
-          description: Default code/message response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "200":
-          description: Successful response
-          content:
-            image/png:
-              schema:
-                type: string
-                format: binary
-            image/svg+xml:
-              schema:
-                type: string
-        "500":
-          description: Internal server error
-          content:
-            text/plain:
-              schema:
-                type: string
-
-  # Endpoints defined at cmd/kubeops/main.go
-  "/api/kubeops/v1/clusters/{cluster}/releases":
-    get:
-      tags:
-        - kubeops
-      summary: "ListAllReleases"
-      description: ""
-      operationId: "ListAllReleases"
-      parameters:
-        - name: cluster
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Cluster name
-      responses:
-        default:
-          description: Default code/message response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "200":
-          description: Successful response
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/AppOverview"
-        "401":
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-  "/api/kubeops/v1/clusters/{cluster}/namespaces/{namespace}/releases":
-    get:
-      tags:
-        - kubeops
-      summary: "ListReleases"
-      description: ""
-      operationId: "ListReleases"
-      parameters:
-        - name: cluster
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Cluster name
-        - name: namespace
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Namespace name
-      responses:
-        default:
-          description: Default code/message response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "200":
-          description: Successful response
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/AppOverview"
-        "401":
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-    post:
-      tags:
-        - kubeops
-      summary: "CreateRelease"
-      description: ""
-      operationId: "CreateRelease"
-      parameters:
-        - name: cluster
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Cluster name
-        - name: namespace
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Namespace name
-      requestBody:
-        description: ""
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/Details"
-      responses:
-        default:
-          description: Default code/message response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "200":
-          description: Successful response
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    $ref: "#/components/schemas/Release"
-        "401":
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "500":
-          description: Internal server error
-          content:
-            text/plain:
-              schema:
-                type: string
-  "/api/kubeops/v1/clusters/{cluster}/namespaces/{namespace}/releases/{releaseName}":
-    get:
-      tags:
-        - kubeops
-      summary: "GetRelease"
-      description: ""
-      operationId: "GetRelease"
-      parameters:
-        - name: cluster
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Cluster name
-        - name: namespace
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Namespace name
-        - name: releaseName
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Release name
-      responses:
-        default:
-          description: Default code/message response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "200":
-          description: Successful response
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    $ref: "#/components/schemas/Release"
-        "401":
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-    delete:
-      tags:
-        - kubeops
-      summary: "DeleteRelease"
-      description: ""
-      operationId: "DeleteRelease"
-      parameters:
-        - name: cluster
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Cluster name
-        - name: namespace
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Namespace name
-        - name: releaseName
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Release name
-      responses:
-        default:
-          description: Default code/message response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "200":
-          description: Successful response
-          content:
-            text/plain:
-              schema:
-                type: string
-        "401":
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "500":
-          description: Internal server error
-          content:
-            text/plain:
-              schema:
-                type: string
-    put:
-      tags:
-        - kubeops
-      summary: "OperateRelease"
-      description: ""
-      operationId: "OperateRelease"
-      parameters:
-        - name: cluster
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Cluster name
-        - name: namespace
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Namespace name
-        - name: releaseName
-          in: path
-          required: true
-          schema:
-            type: string
-            default: default
-          description: Release name
-        - name: action
-          in: query
-          schema:
-            type: string
-            enum: ["upgrade", "rollback"]
-            default: upgrade
-          description: Action to perform
-        - name: revision
-          in: query
-          required: false
-          schema:
-            type: integer
-            format: int64
-            default: 1
-          description: Revision to rollback to (only if ?action=rollback)
-      requestBody:
-        description: ""
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/Details"
-      responses:
-        default:
-          description: Default code/message response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "200":
-          description: Successful response
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    $ref: "#/components/schemas/Release"
-        "401":
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "500":
-          description: Internal server error
-          content:
-            text/plain:
-              schema:
-                type: string
-
-  # Temporarily manually extracted from /cmd/kubeapps-apis/docs/kubeapps-apis.swagger.json
-  /core/packages/v1alpha1/availablepackages:
+  /apis/core/packages/v1alpha1/availablepackages:
     get:
       operationId: PackagesService_GetAvailablePackageSummaries
       responses:
@@ -853,8 +62,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetAvailablePackageSummariesRes\
-                  ponse"
+                $ref: "#/components/schemas/v1alpha1GetAvailablePackageSummariesResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -980,7 +188,7 @@ paths:
             format: int32
       tags:
         - PackagesService
-  "/core/packages/v1alpha1/availablepackages/plugin/{availablePackageRef.plugin.name}/{availablePackageRef.plugin.version}/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}":
+  "/apis/core/packages/v1alpha1/availablepackages/plugin/{availablePackageRef.plugin.name}/{availablePackageRef.plugin.version}/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}":
     get:
       operationId: PackagesService_GetAvailablePackageDetail
       responses:
@@ -989,8 +197,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetAvailablePackageDetailRespon\
-                  se"
+                $ref: "#/components/schemas/v1alpha1GetAvailablePackageDetailResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -1097,7 +304,121 @@ paths:
             type: string
       tags:
         - PackagesService
-  "/core/packages/v1alpha1/availablepackages/plugin/{availablePackageRef.plugin.name}/{availablePackageRef.plugin.version}/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}/versions":
+  "/apis/core/packages/v1alpha1/availablepackages/plugin/{availablePackageRef.plugin.name}/{availablePackageRef.plugin.version}/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}/metadata":
+    get:
+      operationId: PackagesService_GetAvailablePackageMetadatas
+      responses:
+        "200":
+          description: A successful response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/v1alpha1GetAvailablePackageMetadatasResponse"
+        "401":
+          description: Returned when the user does not have permission to access the
+            resource.
+          content:
+            application/json:
+              schema: {}
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/rpcStatus"
+      parameters:
+        - name: availablePackageRef.plugin.name
+          description: >-
+            Plugin name
+
+
+            The name of the plugin, such as `fluxv2.packages` or `kapp_controller.packages`.
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: availablePackageRef.plugin.version
+          description: |-
+            Plugin version
+
+            The version of the plugin, such as v1alpha1
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: availablePackageRef.context.cluster
+          description: >-
+            Cluster
+
+
+            A cluster name can be provided to target a specific cluster if multiple
+
+            clusters are configured, otherwise all clusters will be assumed.
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: availablePackageRef.context.namespace
+          description: >-
+            Namespace
+
+
+            A namespace must be provided if the context of the operation is for a resource
+
+            or resources in a particular namespace.
+
+            For requests to list items, not including a namespace here implies that the context
+
+            for the request is everything the requesting user can read, though the result can
+
+            be filtered by any filtering options of the request. Plugins may choose to return
+
+            Unimplemented for some queries for which we do not yet have a need.
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: availablePackageRef.identifier
+          description: >-
+            Available package identifier
+
+
+            The fully qualified identifier for the available package
+
+            (ie. a unique name for the context). For some packaging systems
+
+            (particularly those where an available package is backed by a CR) this
+
+            will just be the name, but for others such as those where an available
+
+            package is not backed by a CR (eg. standard helm) it may be necessary
+
+            to include the repository in the name or even the repo namespace
+
+            to ensure this is unique.
+
+            For example two helm repositories can define
+
+            an "apache" chart that is available globally, the names would need to
+
+            encode that to be unique (ie. "repoA:apache" and "repoB:apache").
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: .+
+        - name: pkgVersion
+          description: |-
+            Package Version
+
+            Version reference for which metadata is requested.
+          in: query
+          required: false
+          schema:
+            type: string
+      tags:
+        - PackagesService
+  "/apis/core/packages/v1alpha1/availablepackages/plugin/{availablePackageRef.plugin.name}/{availablePackageRef.plugin.version}/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}/versions":
     get:
       operationId: PackagesService_GetAvailablePackageVersions
       responses:
@@ -1106,8 +427,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetAvailablePackageVersionsResp\
-                  onse"
+                $ref: "#/components/schemas/v1alpha1GetAvailablePackageVersionsResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -1217,7 +537,7 @@ paths:
             type: string
       tags:
         - PackagesService
-  /core/packages/v1alpha1/installedpackages:
+  /apis/core/packages/v1alpha1/installedpackages:
     get:
       operationId: PackagesService_GetInstalledPackageSummaries
       responses:
@@ -1226,8 +546,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetInstalledPackageSummariesRes\
-                  ponse"
+                $ref: "#/components/schemas/v1alpha1GetInstalledPackageSummariesResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -1327,7 +646,7 @@ paths:
         $ref: "#/components/requestBodies/v1alpha1CreateInstalledPackageRequest"
       tags:
         - PackagesService
-  "/core/packages/v1alpha1/installedpackages/plugin/{installedPackageRef.plugin.name}/{installedPackageRef.plugin.version}/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}":
+  "/apis/core/packages/v1alpha1/installedpackages/plugin/{installedPackageRef.plugin.name}/{installedPackageRef.plugin.version}/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}":
     get:
       operationId: PackagesService_GetInstalledPackageDetail
       responses:
@@ -1336,8 +655,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetInstalledPackageDetailRespon\
-                  se"
+                $ref: "#/components/schemas/v1alpha1GetInstalledPackageDetailResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -1580,78 +898,11 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                installedPackageRef:
-                  type: object
-                  properties:
-                    context:
-                      type: object
-                      description: The context (cluster/namespace) for the package.
-                      title: Installed package context
-                    plugin:
-                      type: object
-                      example:
-                        name: kapp_controller.packages
-                        version: v1alpha1
-                      description: >-
-                        The plugin used to identify and interact with the
-                        installed package.
-
-                        This field can be omitted when the request is in the context of a specific plugin.
-                      title: >-
-                        The plugin used to identify and interact with the
-                        installed package.
-
-                        This field can be omitted when the request is in the context of a specific plugin.
-                  title: >-
-                    A reference uniquely identifying the installed package being
-                    updated.
-
-                    Required
-                pkgVersionReference:
-                  $ref: "#/components/schemas/v1alpha1VersionReference"
-                values:
-                  type: string
-                  description: >-
-                    An optional serialized values string to be included when
-                    templating a
-
-                    package in the format expected by the plugin. Included when the backend
-
-                    format doesn't use secrets or configmaps for values or supports both.
-
-                    These values are layered on top of any values refs above, when
-
-                    relevant.
-                reconciliationOptions:
-                  $ref: "#/components/schemas/v1alpha1ReconciliationOptions"
-              description: >-
-                Request for UpdateInstalledPackage. The intent is to reach the
-                desired state specified
-
-                by the fields in the request, while leaving other fields intact. This is a whole
-
-                object "Update" semantics rather than "Patch" semantics. The caller will provide the
-
-                values for the fields below, which will replace, or be overlayed onto, the
-
-                corresponding fields in the existing resource. For example, with the
-
-                UpdateInstalledPackageRequest, it is not possible to change just the 'package version
-
-                reference' without also specifying 'values' field. As a side effect, not specifying the
-
-                'values' field in the request means there are no values specified in the desired state.
-
-                So the meaning of each field value is describing the desired state of the corresponding
-
-                field in the resource after the update operation has completed the renconciliation.
-              title: UpdateInstalledPackageRequest
+              $ref: "#/components/schemas/v1alpha1PackagesServiceUpdateInstalledPackageBody"
         required: true
       tags:
         - PackagesService
-  "/core/packages/v1alpha1/installedpackages/plugin/{installedPackageRef.plugin.name}/{installedPackageRef.plugin.version}/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}/resourcerefs":
+  "/apis/core/packages/v1alpha1/installedpackages/plugin/{installedPackageRef.plugin.name}/{installedPackageRef.plugin.version}/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}/resourcerefs":
     get:
       operationId: PackagesService_GetInstalledPackageResourceRefs
       responses:
@@ -1660,8 +911,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetInstalledPackageResourceRefs\
-                  Response"
+                $ref: "#/components/schemas/v1alpha1GetInstalledPackageResourceRefsResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -1736,7 +986,7 @@ paths:
             type: string
       tags:
         - PackagesService
-  /core/packages/v1alpha1/repositories:
+  /apis/core/packages/v1alpha1/repositories:
     get:
       operationId: RepositoriesService_GetPackageRepositorySummaries
       responses:
@@ -1745,8 +995,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetPackageRepositorySummariesRe\
-                  sponse"
+                $ref: "#/components/schemas/v1alpha1GetPackageRepositorySummariesResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -1819,7 +1068,64 @@ paths:
         $ref: "#/components/requestBodies/v1alpha1AddPackageRepositoryRequest"
       tags:
         - RepositoriesService
-  "/core/packages/v1alpha1/repositories/plugin/{packageRepoRef.plugin.name}/{packageRepoRef.plugin.version}/c/{packageRepoRef.context.cluster}/ns/{packageRepoRef.context.namespace}/{packageRepoRef.identifier}":
+  "/apis/core/packages/v1alpha1/repositories/c/{context.cluster}/permissions":
+    get:
+      operationId: RepositoriesService_GetPackageRepositoryPermissions
+      responses:
+        "200":
+          description: A successful response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/v1alpha1GetPackageRepositoryPermissionsResponse"
+        "401":
+          description: Returned when the user does not have permission to access the
+            resource.
+          content:
+            application/json:
+              schema: {}
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/rpcStatus"
+      parameters:
+        - name: context.cluster
+          description: >-
+            Cluster
+
+
+            A cluster name can be provided to target a specific cluster if multiple
+
+            clusters are configured, otherwise all clusters will be assumed.
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: context.namespace
+          description: >-
+            Namespace
+
+
+            A namespace must be provided if the context of the operation is for a resource
+
+            or resources in a particular namespace.
+
+            For requests to list items, not including a namespace here implies that the context
+
+            for the request is everything the requesting user can read, though the result can
+
+            be filtered by any filtering options of the request. Plugins may choose to return
+
+            Unimplemented for some queries for which we do not yet have a need.
+          in: query
+          required: false
+          schema:
+            type: string
+      tags:
+        - RepositoriesService
+  "/apis/core/packages/v1alpha1/repositories/plugin/{packageRepoRef.plugin.name}/{packageRepoRef.plugin.version}/c/{packageRepoRef.context.cluster}/ns/{packageRepoRef.context.namespace}/{packageRepoRef.identifier}":
     get:
       operationId: RepositoriesService_GetPackageRepositoryDetail
       responses:
@@ -1828,8 +1134,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetPackageRepositoryDetailRespo\
-                  nse"
+                $ref: "#/components/schemas/v1alpha1GetPackageRepositoryDetailResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -2075,63 +1380,11 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                packageRepoRef:
-                  type: object
-                  properties:
-                    context:
-                      type: object
-                      description: The context (cluster/namespace) for the repository.
-                      title: The context (cluster/namespace) for the repository.
-                    plugin:
-                      type: object
-                      example:
-                        name: kapp_controller.packages
-                        version: v1alpha1
-                      description: >-
-                        The plugin used to interact with this available package.
-
-                        This field should be omitted when the request is in the context of a
-
-                        specific plugin.
-                      title: >-
-                        The plugin used to interact with this available package.
-
-                        This field should be omitted when the request is in the context of a
-
-                        specific plugin.
-                  title: >-
-                    A reference uniquely identifying the package repository
-                    being updated.
-
-                    The only required field
-                url:
-                  type: string
-                  description: URL identifying the package repository location.
-                description:
-                  type: string
-                  description: A user-provided description.
-                interval:
-                  type: integer
-                  format: int64
-                  title: >-
-                    The interval at which to check the upstream for updates (in
-                    seconds)
-
-                    Optional. Defaults to 10m if not specified
-                tlsConfig:
-                  $ref: "#/components/schemas/v1alpha1PackageRepositoryTlsConfig"
-                auth:
-                  $ref: "#/components/schemas/v1alpha1PackageRepositoryAuth"
-                customDetail:
-                  $ref: "#/components/schemas/protobufAny"
-              description: Request for UpdatePackageRepository
-              title: UpdatePackageRepositoryRequest
+              $ref: "#/components/schemas/v1alpha1RepositoriesServiceUpdatePackageRepositoryBody"
         required: true
       tags:
         - RepositoriesService
-  /core/plugins/v1alpha1/configured-plugins:
+  /apis/core/plugins/v1alpha1/configured-plugins:
     get:
       summary: GetConfiguredPlugins returns a map of short and longnames for the
         configured plugins.
@@ -2157,7 +1410,7 @@ paths:
                 $ref: "#/components/schemas/rpcStatus"
       tags:
         - PluginsService
-  /plugins/fluxv2/packages/v1alpha1/availablepackages:
+  /apis/plugins/fluxv2/packages/v1alpha1/availablepackages:
     get:
       summary: GetAvailablePackageSummaries returns the available packages managed by
         the 'fluxv2' plugin
@@ -2168,8 +1421,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetAvailablePackageSummariesRes\
-                  ponse"
+                $ref: "#/components/schemas/v1alpha1GetAvailablePackageSummariesResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -2295,7 +1547,7 @@ paths:
             format: int32
       tags:
         - FluxV2PackagesService
-  "/plugins/fluxv2/packages/v1alpha1/availablepackages/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}":
+  "/apis/plugins/fluxv2/packages/v1alpha1/availablepackages/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}":
     get:
       summary: GetAvailablePackageDetail returns the package metadata managed by the
         'fluxv2' plugin
@@ -2306,8 +1558,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetAvailablePackageDetailRespon\
-                  se"
+                $ref: "#/components/schemas/v1alpha1GetAvailablePackageDetailResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -2414,7 +1665,7 @@ paths:
             type: string
       tags:
         - FluxV2PackagesService
-  "/plugins/fluxv2/packages/v1alpha1/availablepackages/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}/versions":
+  "/apis/plugins/fluxv2/packages/v1alpha1/availablepackages/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}/versions":
     get:
       summary: GetAvailablePackageVersions returns the package versions managed by the
         'fluxv2' plugin
@@ -2425,8 +1676,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetAvailablePackageVersionsResp\
-                  onse"
+                $ref: "#/components/schemas/v1alpha1GetAvailablePackageVersionsResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -2536,7 +1786,7 @@ paths:
             type: string
       tags:
         - FluxV2PackagesService
-  /plugins/fluxv2/packages/v1alpha1/installedpackages:
+  /apis/plugins/fluxv2/packages/v1alpha1/installedpackages:
     get:
       summary: GetInstalledPackageSummaries returns the installed packages managed by
         the 'fluxv2' plugin
@@ -2547,8 +1797,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetInstalledPackageSummariesRes\
-                  ponse"
+                $ref: "#/components/schemas/v1alpha1GetInstalledPackageSummariesResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -2649,7 +1898,7 @@ paths:
         $ref: "#/components/requestBodies/v1alpha1CreateInstalledPackageRequest"
       tags:
         - FluxV2PackagesService
-  "/plugins/fluxv2/packages/v1alpha1/installedpackages/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}":
+  "/apis/plugins/fluxv2/packages/v1alpha1/installedpackages/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}":
     get:
       summary: GetInstalledPackageDetail returns the requested installed package
         managed by the 'fluxv2' plugin
@@ -2660,8 +1909,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetInstalledPackageDetailRespon\
-                  se"
+                $ref: "#/components/schemas/v1alpha1GetInstalledPackageDetailResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -2884,11 +2132,14 @@ paths:
           schema:
             type: string
       requestBody:
-        $ref: "#/components/requestBodies/FluxV2PackagesService_UpdateInstalledPack\
-          ageBody"
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/v1alpha1FluxV2PackagesServiceUpdateInstalledPackageBody"
+        required: true
       tags:
         - FluxV2PackagesService
-  "/plugins/fluxv2/packages/v1alpha1/installedpackages/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}/resourcerefs":
+  "/apis/plugins/fluxv2/packages/v1alpha1/installedpackages/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}/resourcerefs":
     get:
       summary: >-
         GetInstalledPackageResourceRefs returns the references for the
@@ -2902,8 +2153,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetInstalledPackageResourceRefs\
-                  Response"
+                $ref: "#/components/schemas/v1alpha1GetInstalledPackageResourceRefsResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -2978,7 +2228,7 @@ paths:
             type: string
       tags:
         - FluxV2PackagesService
-  /plugins/fluxv2/packages/v1alpha1/repositories:
+  /apis/plugins/fluxv2/packages/v1alpha1/repositories:
     get:
       operationId: FluxV2RepositoriesService_GetPackageRepositorySummaries
       responses:
@@ -2987,8 +2237,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetPackageRepositorySummariesRe\
-                  sponse"
+                $ref: "#/components/schemas/v1alpha1GetPackageRepositorySummariesResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -3066,7 +2315,64 @@ paths:
         $ref: "#/components/requestBodies/v1alpha1AddPackageRepositoryRequest"
       tags:
         - FluxV2RepositoriesService
-  "/plugins/fluxv2/packages/v1alpha1/repositories/c/{packageRepoRef.context.cluster}/ns/{packageRepoRef.context.namespace}/{packageRepoRef.identifier}":
+  "/apis/plugins/fluxv2/packages/v1alpha1/repositories/c/{context.cluster}/permissions":
+    get:
+      operationId: FluxV2RepositoriesService_GetPackageRepositoryPermissions
+      responses:
+        "200":
+          description: A successful response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/v1alpha1GetPackageRepositoryPermissionsResponse"
+        "401":
+          description: Returned when the user does not have permission to access the
+            resource.
+          content:
+            application/json:
+              schema: {}
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/rpcStatus"
+      parameters:
+        - name: context.cluster
+          description: >-
+            Cluster
+
+
+            A cluster name can be provided to target a specific cluster if multiple
+
+            clusters are configured, otherwise all clusters will be assumed.
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: context.namespace
+          description: >-
+            Namespace
+
+
+            A namespace must be provided if the context of the operation is for a resource
+
+            or resources in a particular namespace.
+
+            For requests to list items, not including a namespace here implies that the context
+
+            for the request is everything the requesting user can read, though the result can
+
+            be filtered by any filtering options of the request. Plugins may choose to return
+
+            Unimplemented for some queries for which we do not yet have a need.
+          in: query
+          required: false
+          schema:
+            type: string
+      tags:
+        - FluxV2RepositoriesService
+  "/apis/plugins/fluxv2/packages/v1alpha1/repositories/c/{packageRepoRef.context.cluster}/ns/{packageRepoRef.context.namespace}/{packageRepoRef.identifier}":
     get:
       operationId: FluxV2RepositoriesService_GetPackageRepositoryDetail
       responses:
@@ -3075,8 +2381,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetPackageRepositoryDetailRespo\
-                  nse"
+                $ref: "#/components/schemas/v1alpha1GetPackageRepositoryDetailResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -3300,11 +2605,14 @@ paths:
             type: string
             pattern: .+
       requestBody:
-        $ref: "#/components/requestBodies/FluxV2RepositoriesService_UpdatePackageRe\
-          positoryBody"
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/v1alpha1FluxV2RepositoriesServiceUpdatePackageRepositoryBody"
+        required: true
       tags:
         - FluxV2RepositoriesService
-  /plugins/helm/packages/v1alpha1/availablepackages:
+  /apis/plugins/helm/packages/v1alpha1/availablepackages:
     get:
       summary: GetAvailablePackageSummaries returns the available packages managed by
         the 'helm' plugin
@@ -3315,8 +2623,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetAvailablePackageSummariesRes\
-                  ponse"
+                $ref: "#/components/schemas/v1alpha1GetAvailablePackageSummariesResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -3442,7 +2749,7 @@ paths:
             format: int32
       tags:
         - HelmPackagesService
-  "/plugins/helm/packages/v1alpha1/availablepackages/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}":
+  "/apis/plugins/helm/packages/v1alpha1/availablepackages/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}":
     get:
       summary: GetAvailablePackageDetail returns the package details managed by the
         'helm' plugin
@@ -3453,8 +2760,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetAvailablePackageDetailRespon\
-                  se"
+                $ref: "#/components/schemas/v1alpha1GetAvailablePackageDetailResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -3561,7 +2867,7 @@ paths:
             type: string
       tags:
         - HelmPackagesService
-  "/plugins/helm/packages/v1alpha1/availablepackages/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}/versions":
+  "/apis/plugins/helm/packages/v1alpha1/availablepackages/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}/versions":
     get:
       summary: GetAvailablePackageVersions returns the package versions managed by the
         'helm' plugin
@@ -3572,8 +2878,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetAvailablePackageVersionsResp\
-                  onse"
+                $ref: "#/components/schemas/v1alpha1GetAvailablePackageVersionsResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -3683,7 +2988,7 @@ paths:
             type: string
       tags:
         - HelmPackagesService
-  /plugins/helm/packages/v1alpha1/installedpackages:
+  /apis/plugins/helm/packages/v1alpha1/installedpackages:
     get:
       summary: GetInstalledPackageSummaries returns the installed packages managed by
         the 'helm' plugin
@@ -3694,8 +2999,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetInstalledPackageSummariesRes\
-                  ponse"
+                $ref: "#/components/schemas/v1alpha1GetInstalledPackageSummariesResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -3796,7 +3100,7 @@ paths:
         $ref: "#/components/requestBodies/v1alpha1CreateInstalledPackageRequest"
       tags:
         - HelmPackagesService
-  "/plugins/helm/packages/v1alpha1/installedpackages/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}":
+  "/apis/plugins/helm/packages/v1alpha1/installedpackages/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}":
     get:
       summary: GetInstalledPackageDetail returns the requested installed package
         managed by the 'helm' plugin
@@ -3807,8 +3111,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetInstalledPackageDetailRespon\
-                  se"
+                $ref: "#/components/schemas/v1alpha1GetInstalledPackageDetailResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -4031,11 +3334,14 @@ paths:
           schema:
             type: string
       requestBody:
-        $ref: "#/components/requestBodies/FluxV2PackagesService_UpdateInstalledPack\
-          ageBody"
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/v1alpha1HelmPackagesServiceUpdateInstalledPackageBody"
+        required: true
       tags:
         - HelmPackagesService
-  "/plugins/helm/packages/v1alpha1/installedpackages/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}/resourcerefs":
+  "/apis/plugins/helm/packages/v1alpha1/installedpackages/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}/resourcerefs":
     get:
       summary: >-
         GetInstalledPackageResourceRefs returns the references for the
@@ -4049,8 +3355,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetInstalledPackageResourceRefs\
-                  Response"
+                $ref: "#/components/schemas/v1alpha1GetInstalledPackageResourceRefsResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -4125,7 +3430,7 @@ paths:
             type: string
       tags:
         - HelmPackagesService
-  "/plugins/helm/packages/v1alpha1/installedpackages/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}/rollback":
+  "/apis/plugins/helm/packages/v1alpha1/installedpackages/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}/rollback":
     put:
       summary: RollbackInstalledPackage updates an installed package based on the
         request.
@@ -4194,28 +3499,11 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                installedPackageRef:
-                  type: object
-                  properties:
-                    context:
-                      type: object
-                      description: The context (cluster/namespace) for the package.
-                      title: Installed package context
-                    plugin:
-                      $ref: "#/components/schemas/v1alpha1Plugin"
-                  description: A reference uniquely identifying the installed package.
-                  title: Installed package reference
-                releaseRevision:
-                  type: integer
-                  format: int32
-                  description: A number identifying the Helm revision to which to rollback.
-                  title: ReleaseRevision
+              $ref: "#/components/schemas/HelmPackagesServiceRollbackInstalledPackageBody"
         required: true
       tags:
         - HelmPackagesService
-  /plugins/helm/packages/v1alpha1/repositories:
+  /apis/plugins/helm/packages/v1alpha1/repositories:
     get:
       operationId: HelmRepositoriesService_GetPackageRepositorySummaries
       responses:
@@ -4224,8 +3512,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetPackageRepositorySummariesRe\
-                  sponse"
+                $ref: "#/components/schemas/v1alpha1GetPackageRepositorySummariesResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -4300,7 +3587,64 @@ paths:
         $ref: "#/components/requestBodies/v1alpha1AddPackageRepositoryRequest"
       tags:
         - HelmRepositoriesService
-  "/plugins/helm/packages/v1alpha1/repositories/c/{packageRepoRef.context.cluster}/ns/{packageRepoRef.context.namespace}/{packageRepoRef.identifier}":
+  "/apis/plugins/helm/packages/v1alpha1/repositories/c/{context.cluster}/permissions":
+    get:
+      operationId: HelmRepositoriesService_GetPackageRepositoryPermissions
+      responses:
+        "200":
+          description: A successful response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/v1alpha1GetPackageRepositoryPermissionsResponse"
+        "401":
+          description: Returned when the user does not have permission to access the
+            resource.
+          content:
+            application/json:
+              schema: {}
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/rpcStatus"
+      parameters:
+        - name: context.cluster
+          description: >-
+            Cluster
+
+
+            A cluster name can be provided to target a specific cluster if multiple
+
+            clusters are configured, otherwise all clusters will be assumed.
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: context.namespace
+          description: >-
+            Namespace
+
+
+            A namespace must be provided if the context of the operation is for a resource
+
+            or resources in a particular namespace.
+
+            For requests to list items, not including a namespace here implies that the context
+
+            for the request is everything the requesting user can read, though the result can
+
+            be filtered by any filtering options of the request. Plugins may choose to return
+
+            Unimplemented for some queries for which we do not yet have a need.
+          in: query
+          required: false
+          schema:
+            type: string
+      tags:
+        - HelmRepositoriesService
+  "/apis/plugins/helm/packages/v1alpha1/repositories/c/{packageRepoRef.context.cluster}/ns/{packageRepoRef.context.namespace}/{packageRepoRef.identifier}":
     get:
       operationId: HelmRepositoriesService_GetPackageRepositoryDetail
       responses:
@@ -4309,8 +3653,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetPackageRepositoryDetailRespo\
-                  nse"
+                $ref: "#/components/schemas/v1alpha1GetPackageRepositoryDetailResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -4534,11 +3877,14 @@ paths:
             type: string
             pattern: .+
       requestBody:
-        $ref: "#/components/requestBodies/FluxV2RepositoriesService_UpdatePackageRe\
-          positoryBody"
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/v1alpha1HelmRepositoriesServiceUpdatePackageRepositoryBody"
+        required: true
       tags:
         - HelmRepositoriesService
-  /plugins/kapp_controller/packages/v1alpha1/availablepackages:
+  /apis/plugins/kapp_controller/packages/v1alpha1/availablepackages:
     get:
       summary: GetAvailablePackageSummaries returns the available packages managed by
         the 'kapp_controller' plugin
@@ -4549,8 +3895,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetAvailablePackageSummariesRes\
-                  ponse"
+                $ref: "#/components/schemas/v1alpha1GetAvailablePackageSummariesResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -4676,7 +4021,7 @@ paths:
             format: int32
       tags:
         - KappControllerPackagesService
-  "/plugins/kapp_controller/packages/v1alpha1/availablepackages/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}":
+  "/apis/plugins/kapp_controller/packages/v1alpha1/availablepackages/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}":
     get:
       summary: GetAvailablePackageDetail returns the package details managed by the
         'kapp_controller' plugin
@@ -4687,8 +4032,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetAvailablePackageDetailRespon\
-                  se"
+                $ref: "#/components/schemas/v1alpha1GetAvailablePackageDetailResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -4795,7 +4139,7 @@ paths:
             type: string
       tags:
         - KappControllerPackagesService
-  "/plugins/kapp_controller/packages/v1alpha1/availablepackages/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}/versions":
+  "/apis/plugins/kapp_controller/packages/v1alpha1/availablepackages/c/{availablePackageRef.context.cluster}/ns/{availablePackageRef.context.namespace}/{availablePackageRef.identifier}/versions":
     get:
       summary: GetAvailablePackageVersions returns the package versions managed by the
         'kapp_controller' plugin
@@ -4806,8 +4150,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetAvailablePackageVersionsResp\
-                  onse"
+                $ref: "#/components/schemas/v1alpha1GetAvailablePackageVersionsResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -4917,7 +4260,7 @@ paths:
             type: string
       tags:
         - KappControllerPackagesService
-  /plugins/kapp_controller/packages/v1alpha1/installedpackages:
+  /apis/plugins/kapp_controller/packages/v1alpha1/installedpackages:
     get:
       summary: GetInstalledPackageSummaries returns the installed packages managed by
         the 'kapp_controller' plugin
@@ -4928,8 +4271,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetInstalledPackageSummariesRes\
-                  ponse"
+                $ref: "#/components/schemas/v1alpha1GetInstalledPackageSummariesResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -5030,7 +4372,7 @@ paths:
         $ref: "#/components/requestBodies/v1alpha1CreateInstalledPackageRequest"
       tags:
         - KappControllerPackagesService
-  "/plugins/kapp_controller/packages/v1alpha1/installedpackages/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}":
+  "/apis/plugins/kapp_controller/packages/v1alpha1/installedpackages/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}":
     get:
       summary: GetInstalledPackageDetail returns the requested installed package
         managed by the 'kapp_controller' plugin
@@ -5041,8 +4383,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetInstalledPackageDetailRespon\
-                  se"
+                $ref: "#/components/schemas/v1alpha1GetInstalledPackageDetailResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -5265,11 +4606,14 @@ paths:
           schema:
             type: string
       requestBody:
-        $ref: "#/components/requestBodies/FluxV2PackagesService_UpdateInstalledPack\
-          ageBody"
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/v1alpha1KappControllerPackagesServiceUpdateInstalledPackageBody"
+        required: true
       tags:
         - KappControllerPackagesService
-  "/plugins/kapp_controller/packages/v1alpha1/installedpackages/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}/resourcerefs":
+  "/apis/plugins/kapp_controller/packages/v1alpha1/installedpackages/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}/resourcerefs":
     get:
       summary: >-
         GetInstalledPackageResourceRefs returns the references for the
@@ -5283,8 +4627,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetInstalledPackageResourceRefs\
-                  Response"
+                $ref: "#/components/schemas/v1alpha1GetInstalledPackageResourceRefsResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -5359,7 +4702,7 @@ paths:
             type: string
       tags:
         - KappControllerPackagesService
-  /plugins/kapp_controller/packages/v1alpha1/repositories:
+  /apis/plugins/kapp_controller/packages/v1alpha1/repositories:
     get:
       operationId: KappControllerRepositoriesService_GetPackageRepositorySummaries
       responses:
@@ -5368,8 +4711,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetPackageRepositorySummariesRe\
-                  sponse"
+                $ref: "#/components/schemas/v1alpha1GetPackageRepositorySummariesResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -5444,7 +4786,64 @@ paths:
         $ref: "#/components/requestBodies/v1alpha1AddPackageRepositoryRequest"
       tags:
         - KappControllerRepositoriesService
-  "/plugins/kapp_controller/packages/v1alpha1/repositories/c/{packageRepoRef.context.cluster}/ns/{packageRepoRef.context.namespace}/{packageRepoRef.identifier}":
+  "/apis/plugins/kapp_controller/packages/v1alpha1/repositories/c/{context.cluster}/permissions":
+    get:
+      operationId: KappControllerRepositoriesService_GetPackageRepositoryPermissions
+      responses:
+        "200":
+          description: A successful response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/v1alpha1GetPackageRepositoryPermissionsResponse"
+        "401":
+          description: Returned when the user does not have permission to access the
+            resource.
+          content:
+            application/json:
+              schema: {}
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/rpcStatus"
+      parameters:
+        - name: context.cluster
+          description: >-
+            Cluster
+
+
+            A cluster name can be provided to target a specific cluster if multiple
+
+            clusters are configured, otherwise all clusters will be assumed.
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: context.namespace
+          description: >-
+            Namespace
+
+
+            A namespace must be provided if the context of the operation is for a resource
+
+            or resources in a particular namespace.
+
+            For requests to list items, not including a namespace here implies that the context
+
+            for the request is everything the requesting user can read, though the result can
+
+            be filtered by any filtering options of the request. Plugins may choose to return
+
+            Unimplemented for some queries for which we do not yet have a need.
+          in: query
+          required: false
+          schema:
+            type: string
+      tags:
+        - KappControllerRepositoriesService
+  "/apis/plugins/kapp_controller/packages/v1alpha1/repositories/c/{packageRepoRef.context.cluster}/ns/{packageRepoRef.context.namespace}/{packageRepoRef.identifier}":
     get:
       operationId: KappControllerRepositoriesService_GetPackageRepositoryDetail
       responses:
@@ -5453,8 +4852,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/v1alpha1GetPackageRepositoryDetailRespo\
-                  nse"
+                $ref: "#/components/schemas/v1alpha1GetPackageRepositoryDetailResponse"
         "401":
           description: Returned when the user does not have permission to access the
             resource.
@@ -5678,11 +5076,14 @@ paths:
             type: string
             pattern: .+
       requestBody:
-        $ref: "#/components/requestBodies/FluxV2RepositoriesService_UpdatePackageRe\
-          positoryBody"
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/v1alpha1KappControllerRepositoriesServiceUpdatePackageRepositoryBody"
+        required: true
       tags:
         - KappControllerRepositoriesService
-  "/plugins/resources/v1alpha1/c/{cluster}/namespacenames":
+  "/apis/plugins/resources/v1alpha1/c/{cluster}/namespacenames":
     get:
       operationId: ResourcesService_GetNamespaceNames
       responses:
@@ -5721,7 +5122,90 @@ paths:
             type: string
       tags:
         - ResourcesService
-  "/plugins/resources/v1alpha1/c/{context.cluster}/ns":
+  "/apis/plugins/resources/v1alpha1/c/{context.cluster}/can-i":
+    post:
+      operationId: ResourcesService_CanI
+      responses:
+        "200":
+          description: A successful response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/v1alpha1CanIResponse"
+        "401":
+          description: Returned when the user does not have permission to access the
+            resource.
+          content:
+            application/json:
+              schema: {}
+        default:
+          description: An unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/rpcStatus"
+      parameters:
+        - name: context.cluster
+          description: >-
+            Cluster
+
+
+            A cluster name can be provided to target a specific cluster if multiple
+
+            clusters are configured, otherwise all clusters will be assumed.
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: context.namespace
+          description: >-
+            Namespace
+
+
+            A namespace must be provided if the context of the operation is for a resource
+
+            or resources in a particular namespace.
+
+            For requests to list items, not including a namespace here implies that the context
+
+            for the request is everything the requesting user can read, though the result can
+
+            be filtered by any filtering options of the request. Plugins may choose to return
+
+            Unimplemented for some queries for which we do not yet have a need.
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: group
+          description: |-
+            Group API Group of the Resource.  "*" means all.
+            +optional
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: resource
+          description: |-
+            Resource is one of the existing resource types.  "*" means all.
+            +optional
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: verb
+          description: >-
+            Verb is a kubernetes resource API verb, like: get, list, watch,
+            create, update, delete, proxy.  "*" means all.
+
+            +optional
+          in: query
+          required: false
+          schema:
+            type: string
+      tags:
+        - ResourcesService
+  "/apis/plugins/resources/v1alpha1/c/{context.cluster}/ns":
     post:
       operationId: ResourcesService_CreateNamespace
       responses:
@@ -5776,9 +5260,19 @@ paths:
           required: false
           schema:
             type: string
+        - name: labels
+          description: >-
+            Labels
+
+
+            This is a request variable of the map type. The query format is "map_name[key]=value", e.g. If the map name is Age, the key type is string, and the value type is integer, the query parameter is expressed as Age["bob"]=18
+          in: query
+          required: false
+          schema:
+            type: string
       tags:
         - ResourcesService
-  "/plugins/resources/v1alpha1/c/{context.cluster}/ns/{context.namespace}":
+  "/apis/plugins/resources/v1alpha1/c/{context.cluster}/ns/{context.namespace}":
     get:
       operationId: ResourcesService_CheckNamespaceExists
       responses:
@@ -5835,7 +5329,7 @@ paths:
             type: string
       tags:
         - ResourcesService
-  "/plugins/resources/v1alpha1/c/{context.cluster}/ns/{context.namespace}/secretnames":
+  "/apis/plugins/resources/v1alpha1/c/{context.cluster}/ns/{context.namespace}/secretnames":
     get:
       operationId: ResourcesService_GetSecretNames
       responses:
@@ -5892,7 +5386,7 @@ paths:
             type: string
       tags:
         - ResourcesService
-  "/plugins/resources/v1alpha1/c/{context.cluster}/ns/{context.namespace}/secrets":
+  "/apis/plugins/resources/v1alpha1/c/{context.cluster}/ns/{context.namespace}/secrets":
     post:
       operationId: ResourcesService_CreateSecret
       responses:
@@ -5976,9 +5470,19 @@ paths:
           required: false
           schema:
             type: string
+        - name: stringData
+          description: >-
+            StringData
+
+
+            This is a request variable of the map type. The query format is "map_name[key]=value", e.g. If the map name is Age, the key type is string, and the value type is integer, the query parameter is expressed as Age["bob"]=18
+          in: query
+          required: false
+          schema:
+            type: string
       tags:
         - ResourcesService
-  "/plugins/resources/v1alpha1/c/{context.cluster}/ns/{context.namespace}/serviceaccountnames":
+  "/apis/plugins/resources/v1alpha1/c/{context.cluster}/ns/{context.namespace}/serviceaccountnames":
     get:
       operationId: ResourcesService_GetServiceAccountNames
       responses:
@@ -6035,7 +5539,7 @@ paths:
             type: string
       tags:
         - ResourcesService
-  "/plugins/resources/v1alpha1/{installedPackageRef.plugin.name}/{installedPackageRef.plugin.version}/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}":
+  "/apis/plugins/resources/v1alpha1/{installedPackageRef.plugin.name}/{installedPackageRef.plugin.version}/c/{installedPackageRef.context.cluster}/ns/{installedPackageRef.context.namespace}/{installedPackageRef.identifier}":
     get:
       operationId: ResourcesService_GetResources
       responses:
@@ -6137,429 +5641,46 @@ paths:
       tags:
         - ResourcesService
 components:
-  securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
   requestBodies:
-    FluxV2RepositoriesService_UpdatePackageRepositoryBody:
+    v1alpha1CreateInstalledPackageRequest:
       content:
         application/json:
           schema:
-            type: object
-            properties:
-              packageRepoRef:
-                type: object
-                properties:
-                  context:
-                    type: object
-                    description: The context (cluster/namespace) for the repository.
-                    title: The context (cluster/namespace) for the repository.
-                  plugin:
-                    $ref: "#/components/schemas/v1alpha1Plugin"
-                title: >-
-                  A reference uniquely identifying the package repository being
-                  updated.
-
-                  The only required field
-              url:
-                type: string
-                description: URL identifying the package repository location.
-              description:
-                type: string
-                description: A user-provided description.
-              interval:
-                type: integer
-                format: int64
-                title: >-
-                  The interval at which to check the upstream for updates (in
-                  seconds)
-
-                  Optional. Defaults to 10m if not specified
-              tlsConfig:
-                $ref: "#/components/schemas/v1alpha1PackageRepositoryTlsConfig"
-              auth:
-                $ref: "#/components/schemas/v1alpha1PackageRepositoryAuth"
-              customDetail:
-                $ref: "#/components/schemas/protobufAny"
-            description: Request for UpdatePackageRepository
-            title: UpdatePackageRepositoryRequest
+            $ref: "#/components/schemas/v1alpha1CreateInstalledPackageRequest"
+      description: Request for CreateInstalledPackage
       required: true
     v1alpha1AddPackageRepositoryRequest:
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/v1alpha1AddPackageRepositoryRequest"
+      description: Request for AddPackageRepository
       required: true
-    v1alpha1CreateInstalledPackageRequest:
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/v1alpha1CreateInstalledPackageRequest"
-      required: true
-    FluxV2PackagesService_UpdateInstalledPackageBody:
-      content:
-        application/json:
-          schema:
-            type: object
-            properties:
-              installedPackageRef:
-                type: object
-                properties:
-                  context:
-                    type: object
-                    description: The context (cluster/namespace) for the package.
-                    title: Installed package context
-                  plugin:
-                    $ref: "#/components/schemas/v1alpha1Plugin"
-                title: >-
-                  A reference uniquely identifying the installed package being
-                  updated.
-
-                  Required
-              pkgVersionReference:
-                $ref: "#/components/schemas/v1alpha1VersionReference"
-              values:
-                type: string
-                description: >-
-                  An optional serialized values string to be included when
-                  templating a
-
-                  package in the format expected by the plugin. Included when the backend
-
-                  format doesn't use secrets or configmaps for values or supports both.
-
-                  These values are layered on top of any values refs above, when
-
-                  relevant.
-              reconciliationOptions:
-                $ref: "#/components/schemas/v1alpha1ReconciliationOptions"
-            description: >-
-              Request for UpdateInstalledPackage. The intent is to reach the
-              desired state specified
-
-              by the fields in the request, while leaving other fields intact. This is a whole
-
-              object "Update" semantics rather than "Patch" semantics. The caller will provide the
-
-              values for the fields below, which will replace, or be overlayed onto, the
-
-              corresponding fields in the existing resource. For example, with the
-
-              UpdateInstalledPackageRequest, it is not possible to change just the 'package version
-
-              reference' without also specifying 'values' field. As a side effect, not specifying the
-
-              'values' field in the request means there are no values specified in the desired state.
-
-              So the meaning of each field value is describing the desired state of the corresponding
-
-              field in the resource after the update operation has completed the renconciliation.
-            title: UpdateInstalledPackageRequest
-      required: true
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      name: Authorization
+      in: header
   schemas:
-    # pkg/chart/chart.go
-    Details:
+    HelmPackagesServiceRollbackInstalledPackageBody:
       type: object
-      additionalProperties: false
       properties:
-        appRepositoryResourceName:
-          type: string
-        appRepositoryResourceNamespace:
-          type: string
-        chartName:
-          type: string
-        releaseName:
-          type: string
-        version:
-          type: string
-        values:
-          type: string
-    # pkg/proxy/proxy.go
-    AppOverview:
-      type: object
-      additionalProperties: false
-      properties:
-        releaseName:
-          type: string
-        version:
-          type: string
-        namespace:
-          type: string
-        icon:
-          type: string
-        status:
-          type: string
-        chart:
-          type: string
-        chartMetadata:
-          $ref: "#/components/schemas/ChartMetadata"
-    # pkg/kube/kube_handler.go
-    AppRepositoryRequestDetails:
-      type: object
-      additionalProperties: false
-      properties:
-        name:
-          type: string
-        type:
-          type: string
-        description:
-          type: string
-        repoURL:
-          type: string
-        authHeader:
-          type: string
-        customCA:
-          type: string
-        registrySecrets:
-          type: array
-          items:
-            type: string
-        syncJobPodTemplate:
-          $ref: "#/components/schemas/PodTemplateSpec"
-        resyncRequests:
+        installedPackageRef:
+          type: object
+          properties:
+            context:
+              type: object
+              description: The context (cluster/namespace) for the package.
+              title: Installed package context
+            plugin:
+              $ref: "#/components/schemas/v1alpha1Plugin"
+          description: A reference uniquely identifying the installed package.
+          title: Installed package reference
+        releaseRevision:
           type: integer
-          format: int64
-        ociRepositories:
-          type: array
-          items:
-            type: string
-        tlsInsecureSkipVerify:
-          type: boolean
-        passCredentials:
-          type: boolean
-    # pkg/kube/kube_handler.go
-    ValidationResponse:
-      type: object
-      additionalProperties: false
-      properties:
-        code:
-          type: integer
-          format: int64
-        message:
-          type: string
-    # pkg/http-handler/http-handler.go
-    AllowedResponse:
-      type: object
-      additionalProperties: false
-      properties:
-        allowed:
-          type: string
-    # pkg/http-handler/http-handler.go
-    AppRepositoryResponse:
-      type: object
-      additionalProperties: false
-      properties:
-        appRepository:
-          $ref: "#/components/schemas/AppRepositoryList"
-    # pkg/http-handler/http-handler.go
-    AppRepositoryRequest:
-      type: object
-      additionalProperties: false
-      properties:
-        appRepository:
-          $ref: "#/components/schemas/AppRepositoryRequestDetails"
-    # cmd/apprepository-controller/pkg/apis/apprepository/v1alpha1/types.go
-    AppRepositoryList:
-      type: object
-      additionalProperties: false
-      properties:
-        metadata:
-          type: object
-        items:
-          type: array
-          items:
-            $ref: "#/components/schemas/AppRepository"
-    # cmd/apprepository-controller/pkg/apis/apprepository/v1alpha1/types.go
-    AppRepository:
-      type: object
-      additionalProperties: false
-      properties:
-        metadata:
-          type: object
-        spec:
-          $ref: "#/components/schemas/AppRepositorySpec"
-        status:
-          $ref: "#/components/schemas/AppRepositoryStatus"
-    # cmd/apprepository-controller/pkg/apis/apprepository/v1alpha1/types.go
-    AppRepositorySpec:
-      type: object
-      additionalProperties: false
-      properties:
-        type:
-          type: string
-        url:
-          type: string
-        auth:
-          $ref: "#/components/schemas/AppRepositoryAuth"
-        resyncRequests:
-          type: integer
-          format: int64
-        syncJobPodTemplate:
-          type: object
-        dockerRegistrySecrets:
-          type: array
-          items:
-            type: string
-        ociRepositories:
-          type: array
-          items:
-            type: string
-        tlsInsecureSkipVerify:
-          type: boolean
-        description:
-          type: string
-        passCredentials:
-          type: boolean
-    # cmd/apprepository-controller/pkg/apis/apprepository/v1alpha1/types.go
-    AppRepositoryStatus:
-      type: object
-      additionalProperties: false
-      properties:
-        status:
-          type: string
-    # cmd/apprepository-controller/pkg/apis/apprepository/v1alpha1/types.go
-    AppRepositoryAuth:
-      type: object
-      additionalProperties: false
-      properties:
-        header:
-          $ref: "#/components/schemas/AppRepositoryAuthHeader"
-        customCA:
-          $ref: "#/components/schemas/AppRepositoryCustomCA"
-    # cmd/apprepository-controller/pkg/apis/apprepository/v1alpha1/types.go
-    AppRepositoryAuthHeader:
-      type: object
-      additionalProperties: false
-      properties:
-        secretKeyRef:
-          type: object
-    # cmd/apprepository-controller/pkg/apis/apprepository/v1alpha1/types.go
-    AppRepositoryCustomCA:
-      type: object
-      additionalProperties: false
-      properties:
-        secretKeyRef:
-          type: object
-    # pkg/mod/k8s.io/api/core/v1/types.go
-    PodTemplateSpec:
-      type: object
-      additionalProperties: false
-      properties:
-        metadata:
-          type: object
-        spec:
-          type: object
-    # pkg/mod/k8s.io/api/core/v1/types.go
-    Namespace:
-      type: object
-      properties:
-        metadata:
-          type: object
-        spec:
-          type: object
-        status:
-          type: object
-    # pkg/mod/k8s.io/api/authorization/v1/types.go
-    ResourceAttributes:
-      type: object
-      additionalProperties: false
-      properties:
-        namespace:
-          type: string
-        verb:
-          type: string
-        group:
-          type: string
-        version:
-          type: string
-        resource:
-          type: string
-        subresource:
-          type: string
-        name:
-          type: string
-    # pkg/mod/k8s.io/helm@v2.16.0+incompatible/pkg/proto/hapi/chart/metadata.pb.go
-    ChartMetadata:
-      type: object
-      additionalProperties: false
-      properties:
-        annotations:
-          type: object
-        apiVersion:
-          type: string
-        appVersion:
-          type: string
-        condition:
-          type: string
-        deprecated:
-          type: boolean
-        description:
-          type: string
-        engine:
-          type: string
-        home:
-          type: string
-        icon:
-          type: string
-        kubeVersion:
-          type: string
-        maintainers:
-          type: array
-          items:
-            type: object
-            properties:
-              name:
-                type: string
-              email:
-                type: string
-              url:
-                type: string
-        name:
-          type: string
-        sources:
-          type: array
-          items:
-            type: string
-        tags:
-          type: string
-        version:
-          type: string
-    # pkg/mod/helm.sh/helm/v3@v3.5.0/pkg/release/release.go
-    Release:
-      type: object
-      additionalProperties: false
-      properties:
-        name:
-          type: string
-        info:
-          type: string
-        chart:
-          type: object
-        config:
-          type: string
-        manifest:
-          type: string
-        hooks:
-          type: array
-          items:
-            type: object
-        version:
-          type: integer
-          format: int64
-        namespace:
-          type: string
-    Error:
-      type: object
-      additionalProperties: false
-      properties:
-        code:
-          type: integer
-          format: int64
-        message:
-          type: string
-    # Temporarily manually extracted from /cmd/kubeapps-apis/docs/kubeapps-apis.swagger.json
+          format: int32
+          description: A number identifying the Helm revision to which to rollback.
+          title: ReleaseRevision
     PackageRepositoryAuthPackageRepositoryAuthType:
       type: string
       enum:
@@ -6572,16 +5693,14 @@ components:
         - PACKAGE_REPOSITORY_AUTH_TYPE_SSH
         - PACKAGE_REPOSITORY_AUTH_TYPE_OPAQUE
       default: PACKAGE_REPOSITORY_AUTH_TYPE_UNSPECIFIED
-    pluginsfluxv2packagesv1alpha1SetUserManagedSecretsResponse:
-      type: object
-      properties:
-        value:
-          type: boolean
-    pluginshelmpackagesv1alpha1SetUserManagedSecretsResponse:
-      type: object
-      properties:
-        value:
-          type: boolean
+      title: >-
+        - PACKAGE_REPOSITORY_AUTH_TYPE_BASIC_AUTH: uses UsernamePassword
+         - PACKAGE_REPOSITORY_AUTH_TYPE_TLS: uses TlsCertKey
+         - PACKAGE_REPOSITORY_AUTH_TYPE_BEARER: uses header
+         - PACKAGE_REPOSITORY_AUTH_TYPE_AUTHORIZATION_HEADER: uses header
+         - PACKAGE_REPOSITORY_AUTH_TYPE_DOCKER_CONFIG_JSON: uses DockerCredentials
+         - PACKAGE_REPOSITORY_AUTH_TYPE_SSH: uses SshCredentials
+         - PACKAGE_REPOSITORY_AUTH_TYPE_OPAQUE: uses OpaqueCredentials
     protobufAny:
       type: object
       properties:
@@ -6625,7 +5744,9 @@ components:
 
             protobuf release, and it is not used for type URLs beginning with
 
-            type.googleapis.com.
+            type.googleapis.com. As of May 2023, there are no widely used type server
+
+            implementations and no plans to implement one.
 
 
             Schemes other than `http`, `https` (or the empty scheme) might be
@@ -6662,8 +5783,12 @@ components:
             if (any.is(Foo.class)) {
               foo = any.unpack(Foo.class);
             }
+            // or ...
+            if (any.isSameTypeAs(Foo.getDefaultInstance())) {
+              foo = any.unpack(Foo.getDefaultInstance());
+            }
 
-          Example 3: Pack and unpack a message in Python.
+         Example 3: Pack and unpack a message in Python.
 
             foo = Foo(...)
             any = Any()
@@ -6673,18 +5798,18 @@ components:
               any.Unpack(foo)
               ...
 
-          Example 4: Pack and unpack a message in Go
+         Example 4: Pack and unpack a message in Go
 
-              foo := &pb.Foo{...}
-              any, err := anypb.New(foo)
-              if err != nil {
-                ...
-              }
-              ...
-              foo := &pb.Foo{}
-              if err := any.UnmarshalTo(foo); err != nil {
-                ...
-              }
+             foo := &pb.Foo{...}
+             any, err := anypb.New(foo)
+             if err != nil {
+               ...
+             }
+             ...
+             foo := &pb.Foo{}
+             if err := any.UnmarshalTo(foo); err != nil {
+               ...
+             }
 
         The pack methods provided by protobuf library will by default use
 
@@ -6695,7 +5820,6 @@ components:
         in the type URL, for example "foo.bar.com/x/y.z" will yield type
 
         name "y.z".
-
 
 
         JSON
@@ -6716,8 +5840,8 @@ components:
 
             {
               "@type": "type.googleapis.com/google.profile.Person",
-              "firstName": ,
-              "lastName":
+              "firstName": <string>,
+              "lastName": <string>
             }
 
         If the embedded message type is well-known and has a custom JSON
@@ -6767,9 +5891,9 @@ components:
 
             In general, each plug-in will define an acceptable set of valid types
 
-            - for direct helm plug-in valid values are: helm, oci
+            - for direct helm plug-in valid values are: "helm" and "oci"
 
-            - for flux plug-in currently only supported value is helm. In the
+            - for flux plug-in valid values are: "helm" and "oci". In the
               future, we may add support for git and/or AWS s3-style buckets
         url:
           type: string
@@ -6777,10 +5901,17 @@ components:
             A URL identifying the package repository location. Must contain at
             least a protocol and host
         interval:
-          type: integer
-          format: int64
-          title: |-
-            The interval at which to check the upstream for updates (in seconds)
+          type: string
+          title: >-
+            The interval at which to check the upstream for updates (in
+            time+unit)
+
+            Some plugins may, additionally, support other formats, for instance,
+
+            a cron expression.
+
+            e.g., "*/10 * * * *" will be equivalent to "10m"
+
             Optional. Defaults to 10m if not specified
         tlsConfig:
           $ref: "#/components/schemas/v1alpha1PackageRepositoryTlsConfig"
@@ -6815,7 +5946,7 @@ components:
           title: the url of the package repository that contains this package
         homeUrl:
           type: string
-          title: the url of the “home” for the package
+          title: the url of the "home" for the package
         iconUrl:
           type: string
           description: A url for an icon.
@@ -6844,6 +5975,16 @@ components:
 
             as documentation or a starting point for user customization.
           title: Available package default values
+        additionalDefaultValues:
+          type: object
+          additionalProperties:
+            type: string
+          description: >-
+            A package may contain additional default value files for specific
+            scenarios,
+
+            such as values_production.yaml or values_dev.yaml
+          title: Available package additional default values
         valuesSchema:
           type: string
         sourceUrls:
@@ -6872,6 +6013,11 @@ components:
       description: |-
         An AvailablePackageDetail provides additional details required when
         inspecting an individual package.
+
+        TODO: add example for API docs
+         option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+           example: '{}'
+         };
       title: AvailablePackageDetail
     v1alpha1AvailablePackageReference:
       type: object
@@ -6910,6 +6056,12 @@ components:
         identify an available package. This is re-used on the summary and details of an
 
         available package.
+
+
+        TODO: add example for API docs
+         option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+           example: '{}'
+         };
       title: AvailablePackageReference
     v1alpha1AvailablePackageSummary:
       type: object
@@ -6949,7 +6101,22 @@ components:
         installation
 
         useful when aggregating many available packages.
+
+
+        TODO: add example for API docs
+         option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+           example: '{}'
+         };
       title: AvailablePackageSummary
+    v1alpha1CanIResponse:
+      type: object
+      properties:
+        allowed:
+          type: boolean
+          description: True if operation is allowed
+          title: allowed
+      description: Response for CanI operation
+      title: CanIResponse
     v1alpha1CheckNamespaceExistsResponse:
       type: object
       properties:
@@ -6984,7 +6151,13 @@ components:
 
             Unimplemented for some queries for which we do not yet have a need.
           title: Namespace
-      description: A Context specifies the context of the message
+      description: |-
+        A Context specifies the context of the message
+
+        TODO: add example for API docs
+         option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+           example: '{}'
+         };
       title: Context
     v1alpha1CreateInstalledPackageRequest:
       type: object
@@ -7018,7 +6191,13 @@ components:
       properties:
         installedPackageRef:
           $ref: "#/components/schemas/v1alpha1InstalledPackageReference"
-      description: Response for CreateInstalledPackage
+      description: |-
+        Response for CreateInstalledPackage
+
+        TODO: add example for API docs
+         option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+           example: '{"installed_package_ref": {}}'
+         };
       title: CreateInstalledPackageResponse
     v1alpha1CreateNamespaceResponse:
       type: object
@@ -7030,11 +6209,17 @@ components:
       title: CreateSecretResponse
     v1alpha1DeleteInstalledPackageResponse:
       type: object
-      description: Response for DeleteInstalledPackage
+      description: |-
+        Response for DeleteInstalledPackage
+
+        For future extensibility only.
       title: DeleteInstalledPackageResponse
     v1alpha1DeletePackageRepositoryResponse:
       type: object
-      description: Response for DeletePackageRepository
+      description: |-
+        Response for DeletePackageRepository
+
+        For future extensibility only.
       title: DeletePackageRepositoryResponse
     v1alpha1DockerCredentials:
       type: object
@@ -7079,15 +6264,140 @@ components:
           type: string
           description: Packaged app version for the request
           title: App version
-      description: FilterOptions available when requesting summaries
+      description: |-
+        FilterOptions available when requesting summaries
+
+        TODO: add example for API docs
+         option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+           example: '{}'
+         };
       title: FilterOptions
+    v1alpha1FluxV2PackagesServiceUpdateInstalledPackageBody:
+      type: object
+      properties:
+        installedPackageRef:
+          type: object
+          properties:
+            context:
+              type: object
+              description: The context (cluster/namespace) for the package.
+              title: Installed package context
+            plugin:
+              $ref: "#/components/schemas/v1alpha1Plugin"
+          title: >-
+            A reference uniquely identifying the installed package being
+            updated.
+
+            Required
+        pkgVersionReference:
+          $ref: "#/components/schemas/v1alpha1VersionReference"
+        values:
+          type: string
+          description: >-
+            An optional serialized values string to be included when templating
+            a
+
+            package in the format expected by the plugin. Included when the backend
+
+            format doesn't use secrets or configmaps for values or supports both.
+
+            These values are layered on top of any values refs above, when
+
+            relevant.
+        reconciliationOptions:
+          $ref: "#/components/schemas/v1alpha1ReconciliationOptions"
+      description: >-
+        Request for UpdateInstalledPackage. The intent is to reach the desired
+        state specified
+
+        by the fields in the request, while leaving other fields intact. This is a whole
+
+        object "Update" semantics rather than "Patch" semantics. The caller will provide the
+
+        values for the fields below, which will replace, or be overlaid onto, the
+
+        corresponding fields in the existing resource. For example, with the
+
+        UpdateInstalledPackageRequest, it is not possible to change just the 'package version
+
+        reference' without also specifying 'values' field. As a side effect, not specifying the
+
+        'values' field in the request means there are no values specified in the desired state.
+
+        So the meaning of each field value is describing the desired state of the corresponding
+
+        field in the resource after the update operation has completed the renconciliation.
+      title: UpdateInstalledPackageRequest
+    v1alpha1FluxV2RepositoriesServiceUpdatePackageRepositoryBody:
+      type: object
+      properties:
+        packageRepoRef:
+          type: object
+          properties:
+            context:
+              type: object
+              description: The context (cluster/namespace) for the repository.
+              title: The context (cluster/namespace) for the repository.
+            plugin:
+              $ref: "#/components/schemas/v1alpha1Plugin"
+          title: >-
+            A reference uniquely identifying the package repository being
+            updated.
+
+            The only required field
+        url:
+          type: string
+          description: URL identifying the package repository location.
+        description:
+          type: string
+          description: A user-provided description.
+        interval:
+          type: string
+          title: >-
+            The interval at which to check the upstream for updates (in
+            time+unit)
+
+            Some plugins may, additionally, support other formats, for instance,
+
+            a cron expression.
+
+            e.g., "*/10 * * * *" will be equivalent to "10m"
+
+            Optional. Defaults to 10m if not specified
+        tlsConfig:
+          $ref: "#/components/schemas/v1alpha1PackageRepositoryTlsConfig"
+        auth:
+          $ref: "#/components/schemas/v1alpha1PackageRepositoryAuth"
+        customDetail:
+          $ref: "#/components/schemas/protobufAny"
+      description: Request for UpdatePackageRepository
+      title: UpdatePackageRepositoryRequest
     v1alpha1GetAvailablePackageDetailResponse:
       type: object
       properties:
         availablePackageDetail:
           $ref: "#/components/schemas/v1alpha1AvailablePackageDetail"
-      description: Response for GetAvailablePackageDetail
+      description: |-
+        Response for GetAvailablePackageDetail
+
+        TODO: add example for API docs
+         option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+           example: '{"available_package_detail": [{}]}'
+         };
       title: GetAvailablePackageDetailResponse
+    v1alpha1GetAvailablePackageMetadatasResponse:
+      type: object
+      properties:
+        availablePackageRef:
+          $ref: "#/components/schemas/v1alpha1AvailablePackageReference"
+        packageMetadata:
+          type: array
+          items:
+            $ref: "#/components/schemas/v1alpha1PackageMetadata"
+          description: A list of metadata associated with this available package.
+          title: Package Metadata
+      description: Response for GetAvailablePackageMetadatas
+      title: GetAvailablePackageMetadatasResponse
     v1alpha1GetAvailablePackageSummariesResponse:
       type: object
       properties:
@@ -7109,10 +6419,16 @@ components:
           type: array
           items:
             type: string
-          description: This optional field contains the distinct category names considering
-            the FilterOptions.
+          description: This optional field contains the distinct category names
+            considering the FilterOptions.
           title: Categories
-      description: Response for GetAvailablePackageSummaries
+      description: |-
+        Response for GetAvailablePackageSummaries
+
+        TODO: add example for API docs
+         option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+           example: '{"available_package_summaries": [{}]}'
+         };
       title: GetAvailablePackageSummariesResponse
     v1alpha1GetAvailablePackageVersionsResponse:
       type: object
@@ -7150,7 +6466,13 @@ components:
 
             the full history of versions matching the version query should be returned.
           title: Package app versions
-      description: Response for GetAvailablePackageVersions
+      description: |-
+        Response for GetAvailablePackageVersions
+
+        TODO: add example for API docs
+         option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+           example: '{"package_app_versions": [{}]}'
+         };
       title: GetAvailablePackageVersionsResponse
     v1alpha1GetConfiguredPluginsResponse:
       type: object
@@ -7172,7 +6494,13 @@ components:
       properties:
         installedPackageDetail:
           $ref: "#/components/schemas/v1alpha1InstalledPackageDetail"
-      description: Response for GetInstalledPackageDetail
+      description: |-
+        Response for GetInstalledPackageDetail
+
+        TODO: add example for API docs
+         option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+           example: '{"installed_package_detail": [{}]}'
+         };
       title: GetInstalledPackageDetailResponse
     v1alpha1GetInstalledPackageResourceRefsResponse:
       type: object
@@ -7222,6 +6550,13 @@ components:
           $ref: "#/components/schemas/v1alpha1PackageRepositoryDetail"
       description: Response for GetPackageRepositoryDetail
       title: GetPackageRepositoryDetailResponse
+    v1alpha1GetPackageRepositoryPermissionsResponse:
+      type: object
+      properties:
+        permissions:
+          type: array
+          items:
+            $ref: "#/components/schemas/v1alpha1PackageRepositoriesPermissions"
     v1alpha1GetPackageRepositorySummariesResponse:
       type: object
       properties:
@@ -7272,6 +6607,106 @@ components:
           title: ServiceAccountNames
       description: Response for GetServiceAccountNames
       title: GetServiceAccountNamesResponse
+    v1alpha1HelmPackagesServiceUpdateInstalledPackageBody:
+      type: object
+      properties:
+        installedPackageRef:
+          type: object
+          properties:
+            context:
+              type: object
+              description: The context (cluster/namespace) for the package.
+              title: Installed package context
+            plugin:
+              $ref: "#/components/schemas/v1alpha1Plugin"
+          title: >-
+            A reference uniquely identifying the installed package being
+            updated.
+
+            Required
+        pkgVersionReference:
+          $ref: "#/components/schemas/v1alpha1VersionReference"
+        values:
+          type: string
+          description: >-
+            An optional serialized values string to be included when templating
+            a
+
+            package in the format expected by the plugin. Included when the backend
+
+            format doesn't use secrets or configmaps for values or supports both.
+
+            These values are layered on top of any values refs above, when
+
+            relevant.
+        reconciliationOptions:
+          $ref: "#/components/schemas/v1alpha1ReconciliationOptions"
+      description: >-
+        Request for UpdateInstalledPackage. The intent is to reach the desired
+        state specified
+
+        by the fields in the request, while leaving other fields intact. This is a whole
+
+        object "Update" semantics rather than "Patch" semantics. The caller will provide the
+
+        values for the fields below, which will replace, or be overlaid onto, the
+
+        corresponding fields in the existing resource. For example, with the
+
+        UpdateInstalledPackageRequest, it is not possible to change just the 'package version
+
+        reference' without also specifying 'values' field. As a side effect, not specifying the
+
+        'values' field in the request means there are no values specified in the desired state.
+
+        So the meaning of each field value is describing the desired state of the corresponding
+
+        field in the resource after the update operation has completed the renconciliation.
+      title: UpdateInstalledPackageRequest
+    v1alpha1HelmRepositoriesServiceUpdatePackageRepositoryBody:
+      type: object
+      properties:
+        packageRepoRef:
+          type: object
+          properties:
+            context:
+              type: object
+              description: The context (cluster/namespace) for the repository.
+              title: The context (cluster/namespace) for the repository.
+            plugin:
+              $ref: "#/components/schemas/v1alpha1Plugin"
+          title: >-
+            A reference uniquely identifying the package repository being
+            updated.
+
+            The only required field
+        url:
+          type: string
+          description: URL identifying the package repository location.
+        description:
+          type: string
+          description: A user-provided description.
+        interval:
+          type: string
+          title: >-
+            The interval at which to check the upstream for updates (in
+            time+unit)
+
+            Some plugins may, additionally, support other formats, for instance,
+
+            a cron expression.
+
+            e.g., "*/10 * * * *" will be equivalent to "10m"
+
+            Optional. Defaults to 10m if not specified
+        tlsConfig:
+          $ref: "#/components/schemas/v1alpha1PackageRepositoryTlsConfig"
+        auth:
+          $ref: "#/components/schemas/v1alpha1PackageRepositoryAuth"
+        customDetail:
+          $ref: "#/components/schemas/protobufAny"
+      description: Request for UpdatePackageRepository
+      title: UpdatePackageRepositoryRequest
     v1alpha1InstalledPackageDetail:
       type: object
       properties:
@@ -7329,6 +6764,12 @@ components:
         uniquely
 
         identify an installed package.
+
+
+        TODO: add example for API docs
+         option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+           example: '{}'
+         };
       title: InstalledPackageReference
     v1alpha1InstalledPackageStatus:
       type: object
@@ -7380,8 +6821,8 @@ components:
           title: Installed package icon URL
         pkgDisplayName:
           type: string
-          description: The package name as displayed to users (provided by the package, eg.
-            "PostgreSQL")
+          description: The package name as displayed to users (provided by the package,
+            eg. "PostgreSQL")
           title: PackageDisplayName
         shortDescription:
           type: string
@@ -7396,7 +6837,112 @@ components:
       description: |-
         An InstalledPackageSummary provides a summary of an installed package
         useful when aggregating many installed packages.
+
+        TODO: add example for API docs
+         option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+           example: '{}'
+         };
       title: InstalledPackageSummary
+    v1alpha1KappControllerPackagesServiceUpdateInstalledPackageBody:
+      type: object
+      properties:
+        installedPackageRef:
+          type: object
+          properties:
+            context:
+              type: object
+              description: The context (cluster/namespace) for the package.
+              title: Installed package context
+            plugin:
+              $ref: "#/components/schemas/v1alpha1Plugin"
+          title: >-
+            A reference uniquely identifying the installed package being
+            updated.
+
+            Required
+        pkgVersionReference:
+          $ref: "#/components/schemas/v1alpha1VersionReference"
+        values:
+          type: string
+          description: >-
+            An optional serialized values string to be included when templating
+            a
+
+            package in the format expected by the plugin. Included when the backend
+
+            format doesn't use secrets or configmaps for values or supports both.
+
+            These values are layered on top of any values refs above, when
+
+            relevant.
+        reconciliationOptions:
+          $ref: "#/components/schemas/v1alpha1ReconciliationOptions"
+      description: >-
+        Request for UpdateInstalledPackage. The intent is to reach the desired
+        state specified
+
+        by the fields in the request, while leaving other fields intact. This is a whole
+
+        object "Update" semantics rather than "Patch" semantics. The caller will provide the
+
+        values for the fields below, which will replace, or be overlaid onto, the
+
+        corresponding fields in the existing resource. For example, with the
+
+        UpdateInstalledPackageRequest, it is not possible to change just the 'package version
+
+        reference' without also specifying 'values' field. As a side effect, not specifying the
+
+        'values' field in the request means there are no values specified in the desired state.
+
+        So the meaning of each field value is describing the desired state of the corresponding
+
+        field in the resource after the update operation has completed the renconciliation.
+      title: UpdateInstalledPackageRequest
+    v1alpha1KappControllerRepositoriesServiceUpdatePackageRepositoryBody:
+      type: object
+      properties:
+        packageRepoRef:
+          type: object
+          properties:
+            context:
+              type: object
+              description: The context (cluster/namespace) for the repository.
+              title: The context (cluster/namespace) for the repository.
+            plugin:
+              $ref: "#/components/schemas/v1alpha1Plugin"
+          title: >-
+            A reference uniquely identifying the package repository being
+            updated.
+
+            The only required field
+        url:
+          type: string
+          description: URL identifying the package repository location.
+        description:
+          type: string
+          description: A user-provided description.
+        interval:
+          type: string
+          title: >-
+            The interval at which to check the upstream for updates (in
+            time+unit)
+
+            Some plugins may, additionally, support other formats, for instance,
+
+            a cron expression.
+
+            e.g., "*/10 * * * *" will be equivalent to "10m"
+
+            Optional. Defaults to 10m if not specified
+        tlsConfig:
+          $ref: "#/components/schemas/v1alpha1PackageRepositoryTlsConfig"
+        auth:
+          $ref: "#/components/schemas/v1alpha1PackageRepositoryAuth"
+        customDetail:
+          $ref: "#/components/schemas/protobufAny"
+      description: Request for UpdatePackageRepository
+      title: UpdatePackageRepositoryRequest
     v1alpha1Maintainer:
       type: object
       properties:
@@ -7408,7 +6954,13 @@ components:
           type: string
           description: A maintainer email
           title: Maintainer email
-      description: Maintainers for the package.
+      description: |-
+        Maintainers for the package.
+
+        TODO: add example for API docs
+         option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+           example: '{}'
+         };
       title: Maintainer
     v1alpha1OpaqueCredentials:
       type: object
@@ -7430,9 +6982,55 @@ components:
           type: string
           description: Version of the packaged application
           title: Application version
-      description: PackageAppVersion conveys both the package version and the packaged app
-        version.
+      description: PackageAppVersion conveys both the package version and the packaged
+        app version.
       title: Package AppVersion
+    v1alpha1PackageMetadata:
+      type: object
+      properties:
+        mediaType:
+          type: string
+          description: Media type of this metadata
+          title: Media type
+        artifactType:
+          type: string
+          description: Artifact type of this metadata
+          title: Artifact type
+        digest:
+          type: string
+          description: Digest of this metadata
+          title: Digest
+        name:
+          type: string
+          description: Human readable name for this metadata.
+          title: Name
+        description:
+          type: string
+          description: Human readable description for this metadata.
+          title: Description
+        url:
+          type: string
+          description: The url reference for this metadata.
+          title: URL
+      description: |-
+        PackageMetadata contains info to display and fetch SBOMs, scan results
+        and other linked package metadata.
+      title: Package Metadata
+    v1alpha1PackageRepositoriesPermissions:
+      type: object
+      properties:
+        plugin:
+          $ref: "#/components/schemas/v1alpha1Plugin"
+        global:
+          type: object
+          additionalProperties:
+            type: boolean
+          title: Permissions at the global namespace (if any)
+        namespace:
+          type: object
+          additionalProperties:
+            type: boolean
+          title: Permissions for the namespace
     v1alpha1PackageRepositoryAuth:
       type: object
       properties:
@@ -7500,8 +7098,8 @@ components:
         a given plug-in may or may not support a given authentication type.
 
         For example
-          - direct-helm plug-in does not currently support (6), while flux does
-          - flux plug-in does not support (3) or (4) while direct-helm does
+         - direct-helm plug-in does not currently support (6), while flux does
+         - flux plug-in does not support (3) or (4) while direct-helm does
       title: PackageRepositoryAuth
     v1alpha1PackageRepositoryDetail:
       type: object
@@ -7524,9 +7122,16 @@ components:
           type: string
           description: A URL identifying the package repository location.
         interval:
-          type: integer
-          format: int64
-          title: The interval at which to check the upstream for updates (in seconds)
+          type: string
+          title: >-
+            The interval at which to check the upstream for updates (in
+            time+unit)
+
+            Some plugins may, additionally, support other formats, for instance,
+
+            a cron expression.
+
+            e.g., "*/10 * * * *" will be equivalent to "10m"
         tlsConfig:
           $ref: "#/components/schemas/v1alpha1PackageRepositoryTlsConfig"
         auth:
@@ -7603,6 +7208,10 @@ components:
           description: URL identifying the package repository location.
         status:
           $ref: "#/components/schemas/v1alpha1PackageRepositoryStatus"
+        requiresAuth:
+          type: boolean
+          description: existence of any authentication parameters for connecting to a
+            repository.
       title: PackageRepositorySummary
     v1alpha1PackageRepositoryTlsConfig:
       type: object
@@ -7619,6 +7228,75 @@ components:
         secretRef:
           $ref: "#/components/schemas/v1alpha1SecretKeyReference"
       title: PackageRepositoryTlsConfig
+    v1alpha1PackagesServiceUpdateInstalledPackageBody:
+      type: object
+      properties:
+        installedPackageRef:
+          type: object
+          properties:
+            context:
+              type: object
+              description: The context (cluster/namespace) for the package.
+              title: Installed package context
+            plugin:
+              type: object
+              example:
+                name: kapp_controller.packages
+                version: v1alpha1
+              description: >-
+                The plugin used to identify and interact with the installed
+                package.
+
+                This field can be omitted when the request is in the context of a specific plugin.
+              title: >-
+                The plugin used to identify and interact with the installed
+                package.
+
+                This field can be omitted when the request is in the context of a specific plugin.
+          title: >-
+            A reference uniquely identifying the installed package being
+            updated.
+
+            Required
+        pkgVersionReference:
+          $ref: "#/components/schemas/v1alpha1VersionReference"
+        values:
+          type: string
+          description: >-
+            An optional serialized values string to be included when templating
+            a
+
+            package in the format expected by the plugin. Included when the backend
+
+            format doesn't use secrets or configmaps for values or supports both.
+
+            These values are layered on top of any values refs above, when
+
+            relevant.
+        reconciliationOptions:
+          $ref: "#/components/schemas/v1alpha1ReconciliationOptions"
+      description: >-
+        Request for UpdateInstalledPackage. The intent is to reach the desired
+        state specified
+
+        by the fields in the request, while leaving other fields intact. This is a whole
+
+        object "Update" semantics rather than "Patch" semantics. The caller will provide the
+
+        values for the fields below, which will replace, or be overlaid onto, the
+
+        corresponding fields in the existing resource. For example, with the
+
+        UpdateInstalledPackageRequest, it is not possible to change just the 'package version
+
+        reference' without also specifying 'values' field. As a side effect, not specifying the
+
+        'values' field in the request means there are no values specified in the desired state.
+
+        So the meaning of each field value is describing the desired state of the corresponding
+
+        field in the resource after the update operation has completed the renconciliation.
+      title: UpdateInstalledPackageRequest
     v1alpha1PaginationOptions:
       type: object
       properties:
@@ -7646,6 +7324,12 @@ components:
         https://cloud.google.com/apis/design/design_patterns#list_pagination
 
         just encapsulated in a message so it can be reused on different request messages.
+
+
+        TODO: add example for API docs
+         option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+           example: '{}'
+         };
       title: PaginationOptions
     v1alpha1Plugin:
       type: object
@@ -7669,10 +7353,9 @@ components:
       type: object
       properties:
         interval:
-          type: integer
-          format: int32
+          type: string
           description: The interval with which the package is checked for reconciliation
-            (in seconds)
+            (in time+unit)
           title: Reconciliation Interval
         suspend:
           type: boolean
@@ -7699,6 +7382,65 @@ components:
 
         InstalledPackage.
       title: ReconciliationOptions
+    v1alpha1RepositoriesServiceUpdatePackageRepositoryBody:
+      type: object
+      properties:
+        packageRepoRef:
+          type: object
+          properties:
+            context:
+              type: object
+              description: The context (cluster/namespace) for the repository.
+              title: The context (cluster/namespace) for the repository.
+            plugin:
+              type: object
+              example:
+                name: kapp_controller.packages
+                version: v1alpha1
+              description: >-
+                The plugin used to interact with this available package.
+
+                This field should be omitted when the request is in the context of a
+
+                specific plugin.
+              title: >-
+                The plugin used to interact with this available package.
+
+                This field should be omitted when the request is in the context of a
+
+                specific plugin.
+          title: >-
+            A reference uniquely identifying the package repository being
+            updated.
+
+            The only required field
+        url:
+          type: string
+          description: URL identifying the package repository location.
+        description:
+          type: string
+          description: A user-provided description.
+        interval:
+          type: string
+          title: >-
+            The interval at which to check the upstream for updates (in
+            time+unit)
+
+            Some plugins may, additionally, support other formats, for instance,
+
+            a cron expression.
+
+            e.g., "*/10 * * * *" will be equivalent to "10m"
+
+            Optional. Defaults to 10m if not specified
+        tlsConfig:
+          $ref: "#/components/schemas/v1alpha1PackageRepositoryTlsConfig"
+        auth:
+          $ref: "#/components/schemas/v1alpha1PackageRepositoryAuth"
+        customDetail:
+          $ref: "#/components/schemas/protobufAny"
+      description: Request for UpdatePackageRepository
+      title: UpdatePackageRepositoryRequest
     v1alpha1ResourceRef:
       type: object
       properties:
@@ -7821,7 +7563,13 @@ components:
       properties:
         installedPackageRef:
           $ref: "#/components/schemas/v1alpha1InstalledPackageReference"
-      description: Response for UpdateInstalledPackage
+      description: |-
+        Response for UpdateInstalledPackage
+
+        TODO: add example for API docs
+         option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+           example: '{"installed_package_ref": {}}'
+         };
       title: UpdateInstalledPackageResponse
     v1alpha1UpdatePackageRepositoryResponse:
       type: object

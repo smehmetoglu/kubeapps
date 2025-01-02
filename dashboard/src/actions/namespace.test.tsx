@@ -71,9 +71,7 @@ actionTestCases.forEach(tc => {
 describe("fetchNamespaces", () => {
   it("dispatches the list of namespace names if no error", async () => {
     Namespace.list = jest.fn().mockImplementationOnce(() => {
-      return {
-        namespaces: [{ metadata: { name: "overlook-hotel" } }, { metadata: { name: "room-217" } }],
-      };
+      return ["overlook-hotel", "room-217"];
     });
     const expectedActions = [
       {
@@ -88,7 +86,7 @@ describe("fetchNamespaces", () => {
 
   it("dispatches errorNamespace if the request returns no 'namespaces'", async () => {
     Namespace.list = jest.fn().mockImplementationOnce(() => {
-      return {};
+      return [];
     });
     const err = new Error("The current account does not have access to any namespaces");
     const expectedActions = [
@@ -122,9 +120,7 @@ describe("createNamespace", () => {
   it("dispatches the new namespace and re-fetch namespaces", async () => {
     Namespace.create = jest.fn();
     Namespace.list = jest.fn().mockImplementationOnce(() => {
-      return {
-        namespaces: [{ metadata: { name: "overlook-hotel" } }, { metadata: { name: "room-217" } }],
-      };
+      return ["overlook-hotel", "room-217"];
     });
     const expectedActions = [
       {
@@ -137,7 +133,7 @@ describe("createNamespace", () => {
       },
     ];
 
-    const res = await store.dispatch(createNamespace("default-c", "overlook-hotel"));
+    const res = await store.dispatch(createNamespace("default-c", "overlook-hotel", {}));
     expect(res).toBe(true);
     expect(store.getActions()).toEqual(expectedActions);
   });
@@ -152,7 +148,7 @@ describe("createNamespace", () => {
       },
     ];
 
-    const res = await store.dispatch(createNamespace("default-c", "foo"));
+    const res = await store.dispatch(createNamespace("default-c", "foo", {}));
     expect(res).toBe(false);
     expect(store.getActions()).toEqual(expectedActions);
   });

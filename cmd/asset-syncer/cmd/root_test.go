@@ -13,9 +13,10 @@ import (
 
 func TestParseFlagsCorrect(t *testing.T) {
 	var tests = []struct {
-		name string
-		args []string
-		conf server.Config
+		name        string
+		args        []string
+		conf        server.Config
+		errExpected bool
 	}{
 		{
 			"all arguments are captured (invalidate command)",
@@ -33,19 +34,20 @@ func TestParseFlagsCorrect(t *testing.T) {
 				"--pass-credentials", "true",
 			},
 			server.Config{
-				DatabaseURL:           "foo01",
-				DatabaseName:          "foo02",
-				DatabaseUser:          "foo03",
-				Debug:                 true,
-				Namespace:             "foo04",
-				GlobalReposNamespace:  "kubeapps-global",
-				OciRepositories:       []string{},
-				TlsInsecureSkipVerify: true,
-				FilterRules:           "foo06",
-				PassCredentials:       true,
-				UserAgent:             "asset-syncer/devel (foo05)",
-				UserAgentComment:      "foo05",
+				DatabaseURL:              "foo01",
+				DatabaseName:             "foo02",
+				DatabaseUser:             "foo03",
+				Debug:                    true,
+				Namespace:                "foo04",
+				GlobalPackagingNamespace: "kubeapps-global",
+				OciRepositories:          []string{},
+				TlsInsecureSkipVerify:    true,
+				FilterRules:              "foo06",
+				PassCredentials:          true,
+				UserAgent:                "asset-syncer/devel (foo05)",
+				UserAgentComment:         "foo05",
 			},
+			true,
 		},
 		{
 			"all arguments are captured (sync command)",
@@ -64,19 +66,20 @@ func TestParseFlagsCorrect(t *testing.T) {
 				"--oci-repositories", "foo07",
 			},
 			server.Config{
-				DatabaseURL:           "foo01",
-				DatabaseName:          "foo02",
-				DatabaseUser:          "foo03",
-				Debug:                 true,
-				Namespace:             "foo04",
-				GlobalReposNamespace:  "kubeapps-global",
-				OciRepositories:       []string{"foo07"},
-				TlsInsecureSkipVerify: true,
-				FilterRules:           "foo06",
-				PassCredentials:       true,
-				UserAgent:             "asset-syncer/devel (foo05)",
-				UserAgentComment:      "foo05",
+				DatabaseURL:              "foo01",
+				DatabaseName:             "foo02",
+				DatabaseUser:             "foo03",
+				Debug:                    true,
+				Namespace:                "foo04",
+				GlobalPackagingNamespace: "kubeapps-global",
+				OciRepositories:          []string{"foo07"},
+				TlsInsecureSkipVerify:    true,
+				FilterRules:              "foo06",
+				PassCredentials:          true,
+				UserAgent:                "asset-syncer/devel (foo05)",
+				UserAgentComment:         "foo05",
 			},
+			true,
 		},
 		{
 			"all arguments are captured (delete command)",
@@ -94,19 +97,20 @@ func TestParseFlagsCorrect(t *testing.T) {
 				"--pass-credentials", "true",
 			},
 			server.Config{
-				DatabaseURL:           "foo01",
-				DatabaseName:          "foo02",
-				DatabaseUser:          "foo03",
-				Debug:                 true,
-				Namespace:             "foo04",
-				GlobalReposNamespace:  "kubeapps-global",
-				OciRepositories:       []string{},
-				TlsInsecureSkipVerify: true,
-				FilterRules:           "foo06",
-				PassCredentials:       true,
-				UserAgent:             "asset-syncer/devel (foo05)",
-				UserAgentComment:      "foo05",
+				DatabaseURL:              "foo01",
+				DatabaseName:             "foo02",
+				DatabaseUser:             "foo03",
+				Debug:                    true,
+				Namespace:                "foo04",
+				GlobalPackagingNamespace: "kubeapps-global",
+				OciRepositories:          []string{},
+				TlsInsecureSkipVerify:    true,
+				FilterRules:              "foo06",
+				PassCredentials:          true,
+				UserAgent:                "asset-syncer/devel (foo05)",
+				UserAgentComment:         "foo05",
 			},
+			true,
 		},
 	}
 
@@ -117,7 +121,10 @@ func TestParseFlagsCorrect(t *testing.T) {
 			cmd.SetOut(b)
 			cmd.SetErr(b)
 			cmd.SetArgs(tt.args)
-			cmd.Execute()
+			err := cmd.Execute()
+			if !tt.errExpected && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
 			if got, want := serveOpts, tt.conf; !cmp.Equal(want, got) {
 				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got))
 			}

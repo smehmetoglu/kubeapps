@@ -1,12 +1,14 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2024 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"runtime"
 	"sort"
@@ -15,29 +17,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bufbuild/connect-go"
+	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/k8sutils"
+	authorizationv1 "k8s.io/api/authorization/v1"
+	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
+	k8stesting "k8s.io/client-go/testing"
+
 	"google.golang.org/protobuf/types/known/anypb"
 
+	vendirversions "carvel.dev/vendir/pkg/vendir/versions/v1alpha1"
 	"github.com/cppforlife/go-cli-ui/ui"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	ctlapp "github.com/k14s/kapp/pkg/kapp/app"
-	kappcmdapp "github.com/k14s/kapp/pkg/kapp/cmd/app"
-	kappcmdcore "github.com/k14s/kapp/pkg/kapp/cmd/core"
-	kappcmdtools "github.com/k14s/kapp/pkg/kapp/cmd/tools"
-	"github.com/k14s/kapp/pkg/kapp/logger"
-	ctlres "github.com/k14s/kapp/pkg/kapp/resources"
 	kappctrlv1alpha1 "github.com/vmware-tanzu/carvel-kapp-controller/pkg/apis/kappctrl/v1alpha1"
 	packagingv1alpha1 "github.com/vmware-tanzu/carvel-kapp-controller/pkg/apis/packaging/v1alpha1"
 	datapackagingv1alpha1 "github.com/vmware-tanzu/carvel-kapp-controller/pkg/apiserver/apis/datapackaging/v1alpha1"
 	kappctrlpackageinstall "github.com/vmware-tanzu/carvel-kapp-controller/pkg/packageinstall"
-	vendirversions "github.com/vmware-tanzu/carvel-vendir/pkg/vendir/versions/v1alpha1"
+	ctlapp "github.com/vmware-tanzu/carvel-kapp/pkg/kapp/app"
+	kappcmdapp "github.com/vmware-tanzu/carvel-kapp/pkg/kapp/cmd/app"
+	kappcmdcore "github.com/vmware-tanzu/carvel-kapp/pkg/kapp/cmd/core"
+	kappcmdtools "github.com/vmware-tanzu/carvel-kapp/pkg/kapp/cmd/tools"
+	"github.com/vmware-tanzu/carvel-kapp/pkg/kapp/logger"
+	ctlres "github.com/vmware-tanzu/carvel-kapp/pkg/kapp/resources"
 	corev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/packages/v1alpha1"
 	pluginv1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/plugins/v1alpha1"
 	kappcorev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/plugins/kapp_controller/packages/v1alpha1"
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/clientgetter"
 	"github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/plugins/pkg/pkgutils"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	k8scorev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -81,6 +87,7 @@ var ignoreUnexported = cmpopts.IgnoreUnexported(
 	corev1.PackageRepositoryDetail{},
 	corev1.PackageRepositoryReference{},
 	corev1.PackageRepositoryStatus{},
+	corev1.GetPackageRepositorySummariesResponse{},
 	corev1.PackageRepositorySummary{},
 	corev1.ReconciliationOptions{},
 	corev1.ResourceRef{},
@@ -93,10 +100,14 @@ var ignoreUnexported = cmpopts.IgnoreUnexported(
 	corev1.VersionReference{},
 	kappControllerPluginParsedConfig{},
 	pluginv1.Plugin{},
+	corev1.GetPackageRepositoryPermissionsResponse{},
+	corev1.PackageRepositoriesPermissions{},
 )
 
+const demoGlobalPackagingNamespace = "kapp-controller-packaging-global"
+
 var defaultContext = &corev1.Context{Cluster: "default", Namespace: "default"}
-var defaultGlobalContext = &corev1.Context{Cluster: defaultContext.Cluster, Namespace: globalPackagingNamespace}
+var defaultGlobalContext = &corev1.Context{Cluster: defaultContext.Cluster, Namespace: demoGlobalPackagingNamespace}
 
 var defaultTypeMeta = metav1.TypeMeta{
 	Kind:       pkgRepositoryResource,
@@ -107,84 +118,19 @@ var datapackagingAPIVersion = fmt.Sprintf("%s/%s", datapackagingv1alpha1.SchemeG
 var packagingAPIVersion = fmt.Sprintf("%s/%s", packagingv1alpha1.SchemeGroupVersion.Group, packagingv1alpha1.SchemeGroupVersion.Version)
 var kappctrlAPIVersion = fmt.Sprintf("%s/%s", kappctrlv1alpha1.SchemeGroupVersion.Group, kappctrlv1alpha1.SchemeGroupVersion.Version)
 
-func TestGetClient(t *testing.T) {
-	testClientGetter := func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-		return clientgetter.NewBuilder().
-			WithTyped(typfake.NewSimpleClientset()).
-			WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
-				k8sruntime.NewScheme(),
-				map[schema.GroupVersionResource]string{
-					{Group: "foo", Version: "bar", Resource: "baz"}: "fooList",
-				},
-			)).Build(), nil
-	}
-
-	testCases := []struct {
-		name              string
-		clientGetter      clientgetter.ClientGetterFunc
-		statusCodeClient  codes.Code
-		statusCodeManager codes.Code
-	}{
-		{
-			name:              "it returns internal error status when no clientGetter configured",
-			clientGetter:      nil,
-			statusCodeClient:  codes.Internal,
-			statusCodeManager: codes.OK,
-		},
-		{
-			name: "it returns failed-precondition when configGetter itself errors",
-			clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-				return nil, fmt.Errorf("Bang!")
-			},
-			statusCodeClient:  codes.FailedPrecondition,
-			statusCodeManager: codes.OK,
-		},
-		{
-			name:         "it returns client without error when configured correctly",
-			clientGetter: testClientGetter,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			s := Server{
-				pluginConfig: defaultPluginConfig,
-				clientGetter: tc.clientGetter,
-			}
-
-			typedClient, dynamicClient, errClient := s.GetClients(context.Background(), "")
-
-			if got, want := status.Code(errClient), tc.statusCodeClient; got != want {
-				t.Errorf("got: %+v, want: %+v", got, want)
-			}
-
-			// If there is no error, the client should be a dynamic.Interface implementation.
-			if tc.statusCodeClient == codes.OK {
-				if dynamicClient == nil {
-					t.Errorf("got: nil, want: dynamic.Interface")
-				}
-				if typedClient == nil {
-					t.Errorf("got: nil, want: kubernetes.Interface")
-				}
-			}
-		})
-	}
-}
-
 // available packages
 func TestGetAvailablePackageSummaries(t *testing.T) {
 	testCases := []struct {
-		name               string
-		existingObjects    []k8sruntime.Object
-		expectedPackages   []*corev1.AvailablePackageSummary
-		paginationOptions  corev1.PaginationOptions
-		filterOptions      corev1.FilterOptions
-		expectedStatusCode codes.Code
+		name              string
+		existingObjects   []k8sruntime.Object
+		expectedPackages  []*corev1.AvailablePackageSummary
+		paginationOptions corev1.PaginationOptions
+		filterOptions     corev1.FilterOptions
+		expectedErrorCode connect.Code
 	}{
 		{
-			name:               "it returns without error if there are no packages available",
-			expectedPackages:   []*corev1.AvailablePackageSummary{},
-			expectedStatusCode: codes.OK,
+			name:             "it returns without error if there are no packages available",
+			expectedPackages: []*corev1.AvailablePackageSummary{},
 		},
 		{
 			name: "it returns an internal error status if there is no corresponding package for a package metadata",
@@ -210,7 +156,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.Internal,
+			expectedErrorCode: connect.CodeInternal,
 		},
 		{
 			name: "it returns an invalid argument error status if a page is requested that doesn't exist",
@@ -240,7 +186,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 				PageToken: "2",
 				PageSize:  1,
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "it returns carvel package summaries with basic info from the cluster",
@@ -300,7 +246,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&datapackagingv1alpha1.Package{
@@ -318,7 +264,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1997, time.December, 25, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1997, time.December, 25, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 			},
@@ -417,7 +363,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&datapackagingv1alpha1.Package{
@@ -435,7 +381,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&datapackagingv1alpha1.Package{
@@ -453,7 +399,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1997, time.December, 25, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1997, time.December, 25, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 			},
@@ -530,7 +476,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 			},
@@ -594,7 +540,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 			},
@@ -655,7 +601,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&datapackagingv1alpha1.Package{
@@ -673,7 +619,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&datapackagingv1alpha1.Package{
@@ -691,7 +637,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 			},
@@ -792,7 +738,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&datapackagingv1alpha1.Package{
@@ -810,7 +756,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1997, time.December, 25, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1997, time.December, 25, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&datapackagingv1alpha1.Package{
@@ -828,7 +774,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1997, time.December, 25, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1997, time.December, 25, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 			},
@@ -929,7 +875,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&datapackagingv1alpha1.Package{
@@ -947,7 +893,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1997, time.December, 25, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1997, time.December, 25, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 			},
@@ -1035,7 +981,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&datapackagingv1alpha1.Package{
@@ -1053,7 +999,7 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1997, time.December, 25, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1997, time.December, 25, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 			},
@@ -1076,8 +1022,96 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "it returns empty carvel package summaries if not matching the filters",
+			filterOptions: corev1.FilterOptions{
+				Query:        "foo",
+				Repositories: []string{"foo"},
+				Categories:   []string{"foo"},
+			},
+			existingObjects: []k8sruntime.Object{
+				&datapackagingv1alpha1.PackageMetadata{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       pkgMetadataResource,
+						APIVersion: datapackagingAPIVersion,
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "default",
+						Name:      "tetris.foo.example.com",
+					},
+					Spec: datapackagingv1alpha1.PackageMetadataSpec{
+						DisplayName:        "Classic Tetris",
+						IconSVGBase64:      "Tm90IHJlYWxseSBTVkcK",
+						ShortDescription:   "A great game for arcade gamers",
+						LongDescription:    "A few sentences but not really a readme",
+						Categories:         []string{"logging", "daemon-set"},
+						Maintainers:        []datapackagingv1alpha1.Maintainer{{Name: "person1"}, {Name: "person2"}},
+						SupportDescription: "Some support information",
+						ProviderName:       "Tetris inc.",
+					},
+				},
+				&datapackagingv1alpha1.PackageMetadata{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       pkgMetadataResource,
+						APIVersion: datapackagingAPIVersion,
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "default",
+						Name:      "tombi.foo.example.com",
+					},
+					Spec: datapackagingv1alpha1.PackageMetadataSpec{
+						DisplayName:        "Tombi!",
+						IconSVGBase64:      "Tm90IHJlYWxseSBTVkcK",
+						ShortDescription:   "An awesome game from the 90's",
+						LongDescription:    "Tombi! is an open world platform-adventure game with RPG elements.",
+						Categories:         []string{"platforms", "rpg"},
+						Maintainers:        []datapackagingv1alpha1.Maintainer{{Name: "person1"}, {Name: "person2"}},
+						SupportDescription: "Some support information",
+						ProviderName:       "Tombi!",
+					},
+				},
+				&datapackagingv1alpha1.Package{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       pkgResource,
+						APIVersion: datapackagingAPIVersion,
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "default",
+						Name:      "tetris.foo.example.com.1.2.3",
+					},
+					Spec: datapackagingv1alpha1.PackageSpec{
+						RefName:                         "tetris.foo.example.com",
+						Version:                         "1.2.3",
+						Licenses:                        []string{"my-license"},
+						ReleaseNotes:                    "release notes",
+						CapactiyRequirementsDescription: "capacity description",
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+					},
+				},
+				&datapackagingv1alpha1.Package{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       pkgResource,
+						APIVersion: datapackagingAPIVersion,
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "default",
+						Name:      "tombi.foo.example.com.1.2.5",
+					},
+					Spec: datapackagingv1alpha1.PackageSpec{
+						RefName:                         "tombi.foo.example.com",
+						Version:                         "1.2.5",
+						Licenses:                        []string{"my-license"},
+						ReleaseNotes:                    "release notes",
+						CapactiyRequirementsDescription: "capacity description",
+						ReleasedAt:                      metav1.Time{Time: time.Date(1997, time.December, 25, 0, 0, 0, 0, time.UTC)},
+					},
+				},
+			},
+			expectedPackages: []*corev1.AvailablePackageSummary{},
+		},
 	}
 
+	//nolint:govet
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			var unstructuredObjects []k8sruntime.Object
@@ -1088,34 +1122,33 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 
 			s := Server{
 				pluginConfig: defaultPluginConfig,
-				clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-					return clientgetter.NewBuilder().
-						WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
-							k8sruntime.NewScheme(),
-							map[schema.GroupVersionResource]string{
-								{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgsResource}:         pkgResource + "List",
-								{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgMetadatasResource}: pkgMetadataResource + "List",
-							},
-							unstructuredObjects...,
-						)).Build(), nil
-				},
+				clientGetter: clientgetter.NewBuilder().
+					WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
+						k8sruntime.NewScheme(),
+						map[schema.GroupVersionResource]string{
+							{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgsResource}:         pkgResource + "List",
+							{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgMetadatasResource}: pkgMetadataResource + "List",
+						},
+						unstructuredObjects...,
+					)).
+					Build(),
 			}
 
-			response, err := s.GetAvailablePackageSummaries(context.Background(), &corev1.GetAvailablePackageSummariesRequest{
+			response, err := s.GetAvailablePackageSummaries(context.Background(), connect.NewRequest(&corev1.GetAvailablePackageSummariesRequest{
 				Context:           defaultContext,
 				PaginationOptions: &tc.paginationOptions,
 				FilterOptions:     &tc.filterOptions,
-			})
+			}))
 
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
 				t.Fatalf("got: %d, want: %d, err: %+v", got, want, err)
 			}
 			// If we were expecting an error, continue to the next test.
-			if tc.expectedStatusCode != codes.OK {
+			if tc.expectedErrorCode != 0 {
 				return
 			}
 
-			if got, want := response.AvailablePackageSummaries, tc.expectedPackages; !cmp.Equal(got, want, ignoreUnexported) {
+			if got, want := response.Msg.AvailablePackageSummaries, tc.expectedPackages; !cmp.Equal(got, want, ignoreUnexported) {
 				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
 			}
 		})
@@ -1124,16 +1157,16 @@ func TestGetAvailablePackageSummaries(t *testing.T) {
 
 func TestGetAvailablePackageVersions(t *testing.T) {
 	testCases := []struct {
-		name               string
-		existingObjects    []k8sruntime.Object
-		request            *corev1.GetAvailablePackageVersionsRequest
-		expectedStatusCode codes.Code
-		expectedResponse   *corev1.GetAvailablePackageVersionsResponse
+		name              string
+		existingObjects   []k8sruntime.Object
+		request           *corev1.GetAvailablePackageVersionsRequest
+		expectedErrorCode connect.Code
+		expectedResponse  *corev1.GetAvailablePackageVersionsResponse
 	}{
 		{
-			name:               "it returns invalid argument if called without a package reference",
-			request:            nil,
-			expectedStatusCode: codes.InvalidArgument,
+			name:              "it returns invalid argument if called without a package reference",
+			request:           nil,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "it returns invalid argument if called without namespace",
@@ -1143,7 +1176,7 @@ func TestGetAvailablePackageVersions(t *testing.T) {
 					Identifier: "unknown/package-one",
 				},
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "it returns invalid argument if called without an identifier",
@@ -1154,7 +1187,7 @@ func TestGetAvailablePackageVersions(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "it returns the package version summary",
@@ -1174,7 +1207,7 @@ func TestGetAvailablePackageVersions(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&datapackagingv1alpha1.Package{
@@ -1192,7 +1225,7 @@ func TestGetAvailablePackageVersions(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&datapackagingv1alpha1.Package{
@@ -1210,7 +1243,7 @@ func TestGetAvailablePackageVersions(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 			},
@@ -1222,7 +1255,6 @@ func TestGetAvailablePackageVersions(t *testing.T) {
 					Identifier: "unknown/tetris.foo.example.com",
 				},
 			},
-			expectedStatusCode: codes.OK,
 			expectedResponse: &corev1.GetAvailablePackageVersionsResponse{
 				PackageAppVersions: []*corev1.PackageAppVersion{
 					{
@@ -1252,30 +1284,29 @@ func TestGetAvailablePackageVersions(t *testing.T) {
 
 			s := Server{
 				pluginConfig: defaultPluginConfig,
-				clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-					return clientgetter.NewBuilder().
-						WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
-							k8sruntime.NewScheme(),
-							map[schema.GroupVersionResource]string{
-								{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgsResource}: pkgResource + "List",
-							},
-							unstructuredObjects...,
-						)).Build(), nil
-				},
+				clientGetter: clientgetter.NewBuilder().
+					WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
+						k8sruntime.NewScheme(),
+						map[schema.GroupVersionResource]string{
+							{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgsResource}: pkgResource + "List",
+						},
+						unstructuredObjects...,
+					)).
+					Build(),
 			}
 
-			response, err := s.GetAvailablePackageVersions(context.Background(), tc.request)
+			response, err := s.GetAvailablePackageVersions(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 			}
 
 			// We don't need to check anything else for non-OK codes.
-			if tc.expectedStatusCode != codes.OK {
+			if tc.expectedErrorCode != 0 {
 				return
 			}
 
-			if got, want := response, tc.expectedResponse; !cmp.Equal(want, got, ignoreUnexported) {
+			if got, want := response.Msg, tc.expectedResponse; !cmp.Equal(want, got, ignoreUnexported) {
 				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
 			}
 		})
@@ -1287,7 +1318,7 @@ func TestGetAvailablePackageDetail(t *testing.T) {
 		name            string
 		existingObjects []k8sruntime.Object
 		expectedPackage *corev1.AvailablePackageDetail
-		statusCode      codes.Code
+		errorCode       connect.Code
 		request         *corev1.GetAvailablePackageDetailRequest
 	}{
 		{
@@ -1334,7 +1365,7 @@ func TestGetAvailablePackageDetail(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 			},
@@ -1379,7 +1410,6 @@ Some support information
 					Plugin:     &pluginDetail,
 				},
 			},
-			statusCode: codes.OK,
 		},
 		{
 			name: "it returns an availablePackageDetail of the latest version with repo-based identifiers",
@@ -1428,7 +1458,7 @@ Some support information
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 			},
@@ -1473,7 +1503,6 @@ Some support information
 					Plugin:     &pluginDetail,
 				},
 			},
-			statusCode: codes.OK,
 		},
 		{
 			name: "it combines long description and support description for readme field",
@@ -1519,7 +1548,7 @@ Some support information
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 			},
@@ -1564,7 +1593,6 @@ Some support information
 					Plugin:     &pluginDetail,
 				},
 			},
-			statusCode: codes.OK,
 		},
 		{
 			name: "it returns an invalid arg error status if no context is provided",
@@ -1573,7 +1601,7 @@ Some support information
 					Identifier: "unknown/foo/bar",
 				},
 			},
-			statusCode: codes.InvalidArgument,
+			errorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "it returns not found error status if the requested package version doesn't exist",
@@ -1620,11 +1648,11 @@ Some support information
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 			},
-			statusCode: codes.NotFound,
+			errorCode: connect.CodeNotFound,
 		},
 	}
 
@@ -1638,26 +1666,24 @@ Some support information
 
 			s := Server{
 				pluginConfig: defaultPluginConfig,
-				clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-					return clientgetter.NewBuilder().
-						WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
-							k8sruntime.NewScheme(),
-							map[schema.GroupVersionResource]string{
-								{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgsResource}:         pkgResource + "List",
-								{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgMetadatasResource}: pkgMetadataResource + "List",
-							},
-							unstructuredObjects...,
-						)).Build(), nil
-				},
+				clientGetter: clientgetter.NewBuilder().
+					WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
+						k8sruntime.NewScheme(),
+						map[schema.GroupVersionResource]string{
+							{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgsResource}:         pkgResource + "List",
+							{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgMetadatasResource}: pkgMetadataResource + "List",
+						},
+						unstructuredObjects...,
+					)).Build(),
 			}
-			availablePackageDetail, err := s.GetAvailablePackageDetail(context.Background(), tc.request)
+			availablePackageDetail, err := s.GetAvailablePackageDetail(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.statusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.errorCode; err != nil && got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 			}
 
-			if tc.statusCode == codes.OK {
-				if got, want := availablePackageDetail.AvailablePackageDetail, tc.expectedPackage; !cmp.Equal(got, want, ignoreUnexported) {
+			if tc.errorCode == 0 {
+				if got, want := availablePackageDetail.Msg.AvailablePackageDetail, tc.expectedPackage; !cmp.Equal(got, want, ignoreUnexported) {
 					t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
 				}
 			}
@@ -1669,11 +1695,11 @@ Some support information
 
 func TestGetInstalledPackageSummaries(t *testing.T) {
 	testCases := []struct {
-		name               string
-		request            *corev1.GetInstalledPackageSummariesRequest
-		existingObjects    []k8sruntime.Object
-		expectedPackages   []*corev1.InstalledPackageSummary
-		expectedStatusCode codes.Code
+		name              string
+		request           *corev1.GetInstalledPackageSummariesRequest
+		existingObjects   []k8sruntime.Object
+		expectedPackages  []*corev1.InstalledPackageSummary
+		expectedErrorCode connect.Code
 	}{
 		{
 			name: "it returns an error if a non-existent page is requested",
@@ -1720,7 +1746,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&packagingv1alpha1.PackageInstall{
@@ -1748,7 +1774,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -1768,7 +1794,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name:    "it returns carvel empty installed package summary when no package install is present",
@@ -1809,7 +1835,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 			},
@@ -1854,7 +1880,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&packagingv1alpha1.PackageInstall{
@@ -1882,7 +1908,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -1953,7 +1979,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						APIVersion: datapackagingAPIVersion,
 					},
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace: globalPackagingNamespace,
+						Namespace: demoGlobalPackagingNamespace,
 						Name:      "tetris.foo.example.com",
 					},
 					Spec: datapackagingv1alpha1.PackageMetadataSpec{
@@ -1973,7 +1999,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						APIVersion: datapackagingAPIVersion,
 					},
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace: globalPackagingNamespace,
+						Namespace: demoGlobalPackagingNamespace,
 						Name:      "tetris.foo.example.com.1.2.3",
 					},
 					Spec: datapackagingv1alpha1.PackageSpec{
@@ -1982,7 +2008,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&packagingv1alpha1.PackageInstall{
@@ -2010,7 +2036,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -2077,7 +2103,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						APIVersion: datapackagingAPIVersion,
 					},
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace: globalPackagingNamespace,
+						Namespace: demoGlobalPackagingNamespace,
 						Name:      "tetris.foo.example.com.1.2.3",
 					},
 					Spec: datapackagingv1alpha1.PackageSpec{
@@ -2086,7 +2112,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&packagingv1alpha1.PackageInstall{
@@ -2114,7 +2140,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -2200,7 +2226,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&datapackagingv1alpha1.Package{
@@ -2218,7 +2244,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&packagingv1alpha1.PackageInstall{
@@ -2246,7 +2272,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -2290,7 +2316,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -2410,7 +2436,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&packagingv1alpha1.PackageInstall{
@@ -2438,7 +2464,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 				},
@@ -2516,7 +2542,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&datapackagingv1alpha1.Package{
@@ -2534,7 +2560,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&datapackagingv1alpha1.Package{
@@ -2552,7 +2578,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&packagingv1alpha1.PackageInstall{
@@ -2580,7 +2606,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -2715,7 +2741,7 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -2775,32 +2801,29 @@ func TestGetInstalledPackageSummaries(t *testing.T) {
 
 			s := Server{
 				pluginConfig: defaultPluginConfig,
-				clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-					return clientgetter.NewBuilder().
-						WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
-							k8sruntime.NewScheme(),
-							map[schema.GroupVersionResource]string{
-								{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgsResource}:         pkgResource + "List",
-								{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgMetadatasResource}: pkgMetadataResource + "List",
-								{Group: packagingv1alpha1.SchemeGroupVersion.Group, Version: packagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgInstallsResource}:          pkgInstallResource + "List",
-							},
-							unstructuredObjects...,
-						)).Build(), nil
-				},
-				globalPackagingNamespace: globalPackagingNamespace,
+				clientGetter: clientgetter.NewBuilder().
+					WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
+						k8sruntime.NewScheme(),
+						map[schema.GroupVersionResource]string{
+							{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgsResource}:         pkgResource + "List",
+							{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgMetadatasResource}: pkgMetadataResource + "List",
+							{Group: packagingv1alpha1.SchemeGroupVersion.Group, Version: packagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgInstallsResource}:          pkgInstallResource + "List",
+						},
+						unstructuredObjects...,
+					)).Build(),
 			}
 
-			response, err := s.GetInstalledPackageSummaries(context.Background(), tc.request)
+			response, err := s.GetInstalledPackageSummaries(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
 				t.Fatalf("got: %d, want: %d, err: %+v", got, want, err)
 			}
 			// If we were expecting an error, continue to the next test.
-			if tc.expectedStatusCode != codes.OK {
+			if tc.expectedErrorCode != 0 {
 				return
 			}
 
-			if got, want := response.InstalledPackageSummaries, tc.expectedPackages; !cmp.Equal(got, want, ignoreUnexported) {
+			if got, want := response.Msg.InstalledPackageSummaries, tc.expectedPackages; !cmp.Equal(got, want, ignoreUnexported) {
 				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
 			}
 		})
@@ -2813,7 +2836,7 @@ func TestGetInstalledPackageDetail(t *testing.T) {
 		existingObjects      []k8sruntime.Object
 		existingTypedObjects []k8sruntime.Object
 		expectedPackage      *corev1.InstalledPackageDetail
-		statusCode           codes.Code
+		errorCode            connect.Code
 		request              *corev1.GetInstalledPackageDetailRequest
 	}{
 		{
@@ -2860,7 +2883,7 @@ func TestGetInstalledPackageDetail(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&datapackagingv1alpha1.Package{
@@ -2922,7 +2945,7 @@ func TestGetInstalledPackageDetail(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -2951,7 +2974,7 @@ func TestGetInstalledPackageDetail(t *testing.T) {
 						Name:      "my-installation",
 					},
 					Spec: kappctrlv1alpha1.AppSpec{
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 					},
 					Status: kappctrlv1alpha1.AppStatus{
 						Deploy: &kappctrlv1alpha1.AppStatusDeploy{
@@ -2981,7 +3004,6 @@ func TestGetInstalledPackageDetail(t *testing.T) {
 					},
 				},
 			},
-			statusCode: codes.OK,
 			expectedPackage: &corev1.InstalledPackageDetail{
 				AvailablePackageRef: &corev1.AvailablePackageReference{
 					Context:    defaultContext,
@@ -3096,7 +3118,7 @@ fetchStderr
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&datapackagingv1alpha1.Package{
@@ -3158,7 +3180,7 @@ fetchStderr
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -3187,7 +3209,7 @@ fetchStderr
 						Name:      "my-installation",
 					},
 					Spec: kappctrlv1alpha1.AppSpec{
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 					},
 					Status: kappctrlv1alpha1.AppStatus{
 						Deploy: &kappctrlv1alpha1.AppStatusDeploy{
@@ -3217,7 +3239,6 @@ fetchStderr
 					},
 				},
 			},
-			statusCode: codes.OK,
 			expectedPackage: &corev1.InstalledPackageDetail{
 				AvailablePackageRef: &corev1.AvailablePackageReference{
 					Context:    defaultContext,
@@ -3356,7 +3377,7 @@ fetchStderr
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -3385,7 +3406,7 @@ fetchStderr
 						Name:      "my-installation",
 					},
 					Spec: kappctrlv1alpha1.AppSpec{
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 					},
 					Status: kappctrlv1alpha1.AppStatus{
 						Deploy: &kappctrlv1alpha1.AppStatusDeploy{
@@ -3415,7 +3436,6 @@ fetchStderr
 					},
 				},
 			},
-			statusCode: codes.OK,
 			expectedPackage: &corev1.InstalledPackageDetail{
 				AvailablePackageRef: &corev1.AvailablePackageReference{
 					Context:    defaultContext,
@@ -3491,27 +3511,25 @@ fetchStderr
 
 			s := Server{
 				pluginConfig: defaultPluginConfig,
-				clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-					return clientgetter.NewBuilder().
-						WithTyped(typfake.NewSimpleClientset(tc.existingTypedObjects...)).
-						WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
-							k8sruntime.NewScheme(),
-							map[schema.GroupVersionResource]string{
-								{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgsResource}:         pkgResource + "List",
-								{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgMetadatasResource}: pkgMetadataResource + "List",
-							},
-							unstructuredObjects...,
-						)).Build(), nil
-				},
+				clientGetter: clientgetter.NewBuilder().
+					WithTyped(typfake.NewSimpleClientset(tc.existingTypedObjects...)).
+					WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
+						k8sruntime.NewScheme(),
+						map[schema.GroupVersionResource]string{
+							{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgsResource}:         pkgResource + "List",
+							{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgMetadatasResource}: pkgMetadataResource + "List",
+						},
+						unstructuredObjects...,
+					)).Build(),
 			}
-			installedPackageDetail, err := s.GetInstalledPackageDetail(context.Background(), tc.request)
+			installedPackageDetail, err := s.GetInstalledPackageDetail(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.statusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.errorCode; err != nil && got != want {
 				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
 			}
 
-			if tc.statusCode == codes.OK {
-				if got, want := installedPackageDetail.InstalledPackageDetail, tc.expectedPackage; !cmp.Equal(got, want, ignoreUnexported) {
+			if tc.errorCode == 0 {
+				if got, want := installedPackageDetail.Msg.InstalledPackageDetail, tc.expectedPackage; !cmp.Equal(got, want, ignoreUnexported) {
 					t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
 				}
 			}
@@ -3526,7 +3544,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 		pluginConfig           *kappControllerPluginParsedConfig
 		existingObjects        []k8sruntime.Object
 		existingTypedObjects   []k8sruntime.Object
-		expectedStatusCode     codes.Code
+		expectedErrorCode      connect.Code
 		expectedResponse       *corev1.CreateInstalledPackageResponse
 		expectedPackageInstall *packagingv1alpha1.PackageInstall
 	}{
@@ -3590,7 +3608,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&kappctrlv1alpha1.App{
@@ -3603,7 +3621,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Name:      "my-installation",
 					},
 					Spec: kappctrlv1alpha1.AppSpec{
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 					},
 					Status: kappctrlv1alpha1.AppStatus{
 						Deploy: &kappctrlv1alpha1.AppStatusDeploy{
@@ -3636,7 +3654,6 @@ func TestCreateInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.OK,
 			expectedResponse: &corev1.CreateInstalledPackageResponse{
 				InstalledPackageRef: &corev1.InstalledPackageReference{
 					Context:    defaultContext,
@@ -3708,7 +3725,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 				},
 			},
 			pluginConfig: &kappControllerPluginParsedConfig{
-				timeoutSeconds:                     1, //to avoid unnecesary test delays
+				timeoutSeconds:                     1, //to avoid unnecessary test delays
 				defaultUpgradePolicy:               defaultPluginConfig.defaultUpgradePolicy,
 				defaultPrereleasesVersionSelection: defaultPluginConfig.defaultPrereleasesVersionSelection,
 				defaultAllowDowngrades:             defaultPluginConfig.defaultAllowDowngrades,
@@ -3749,7 +3766,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 			},
@@ -3768,7 +3785,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.Internal,
+			expectedErrorCode: connect.CodeInternal,
 		},
 		{
 			name: "create installed package (with values)",
@@ -3831,7 +3848,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&kappctrlv1alpha1.App{
@@ -3844,7 +3861,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Name:      "my-installation",
 					},
 					Spec: kappctrlv1alpha1.AppSpec{
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 					},
 					Status: kappctrlv1alpha1.AppStatus{
 						Deploy: &kappctrlv1alpha1.AppStatusDeploy{
@@ -3877,7 +3894,6 @@ func TestCreateInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.OK,
 			expectedResponse: &corev1.CreateInstalledPackageResponse{
 				InstalledPackageRef: &corev1.InstalledPackageReference{
 					Context:    defaultContext,
@@ -3987,7 +4003,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&kappctrlv1alpha1.App{
@@ -4000,7 +4016,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Name:      "my-installation",
 					},
 					Spec: kappctrlv1alpha1.AppSpec{
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 					},
 					Status: kappctrlv1alpha1.AppStatus{
 						Deploy: &kappctrlv1alpha1.AppStatusDeploy{
@@ -4033,7 +4049,6 @@ func TestCreateInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.OK,
 			expectedResponse: &corev1.CreateInstalledPackageResponse{
 				InstalledPackageRef: &corev1.InstalledPackageReference{
 					Context:    defaultContext,
@@ -4066,7 +4081,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 					},
 					Paused:     true,
 					Canceled:   false,
-					SyncPeriod: &metav1.Duration{(time.Second * 99)},
+					SyncPeriod: &metav1.Duration{Duration: time.Second * 99},
 					NoopDelete: false,
 				},
 				Status: packagingv1alpha1.PackageInstallStatus{
@@ -4145,7 +4160,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&kappctrlv1alpha1.App{
@@ -4158,7 +4173,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Name:      "my-installation",
 					},
 					Spec: kappctrlv1alpha1.AppSpec{
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 					},
 					Status: kappctrlv1alpha1.AppStatus{
 						Deploy: &kappctrlv1alpha1.AppStatusDeploy{
@@ -4191,7 +4206,6 @@ func TestCreateInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.OK,
 			expectedResponse: &corev1.CreateInstalledPackageResponse{
 				InstalledPackageRef: &corev1.InstalledPackageReference{
 					Context:    defaultContext,
@@ -4241,7 +4255,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 			},
 		},
 		{
-			name: "create installed package (non elegible version)",
+			name: "create installed package (non eligible version)",
 			request: &corev1.CreateInstalledPackageRequest{
 				AvailablePackageRef: &corev1.AvailablePackageReference{
 					Context: &corev1.Context{
@@ -4304,7 +4318,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&kappctrlv1alpha1.App{
@@ -4317,7 +4331,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Name:      "my-installation",
 					},
 					Spec: kappctrlv1alpha1.AppSpec{
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 					},
 					Status: kappctrlv1alpha1.AppStatus{
 						Deploy: &kappctrlv1alpha1.AppStatusDeploy{
@@ -4350,7 +4364,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "create installed package (prereleases - defaultPrereleasesVersionSelection: [])",
@@ -4416,7 +4430,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&kappctrlv1alpha1.App{
@@ -4429,7 +4443,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Name:      "my-installation",
 					},
 					Spec: kappctrlv1alpha1.AppSpec{
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 					},
 					Status: kappctrlv1alpha1.AppStatus{
 						Deploy: &kappctrlv1alpha1.AppStatusDeploy{
@@ -4462,7 +4476,6 @@ func TestCreateInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.OK,
 			expectedResponse: &corev1.CreateInstalledPackageResponse{
 				InstalledPackageRef: &corev1.InstalledPackageReference{
 					Context:    defaultContext,
@@ -4575,7 +4588,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&kappctrlv1alpha1.App{
@@ -4588,7 +4601,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Name:      "my-installation",
 					},
 					Spec: kappctrlv1alpha1.AppSpec{
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 					},
 					Status: kappctrlv1alpha1.AppStatus{
 						Deploy: &kappctrlv1alpha1.AppStatusDeploy{
@@ -4621,7 +4634,6 @@ func TestCreateInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.OK,
 			expectedResponse: &corev1.CreateInstalledPackageResponse{
 				InstalledPackageRef: &corev1.InstalledPackageReference{
 					Context:    defaultContext,
@@ -4730,7 +4742,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&kappctrlv1alpha1.App{
@@ -4743,7 +4755,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Name:      "my-installation",
 					},
 					Spec: kappctrlv1alpha1.AppSpec{
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 					},
 					Status: kappctrlv1alpha1.AppStatus{
 						Deploy: &kappctrlv1alpha1.AppStatusDeploy{
@@ -4776,7 +4788,6 @@ func TestCreateInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.OK,
 			expectedResponse: &corev1.CreateInstalledPackageResponse{
 				InstalledPackageRef: &corev1.InstalledPackageReference{
 					Context:    defaultContext,
@@ -4888,7 +4899,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&kappctrlv1alpha1.App{
@@ -4901,7 +4912,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Name:      "my-installation",
 					},
 					Spec: kappctrlv1alpha1.AppSpec{
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 					},
 					Status: kappctrlv1alpha1.AppStatus{
 						Deploy: &kappctrlv1alpha1.AppStatusDeploy{
@@ -4934,7 +4945,6 @@ func TestCreateInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.OK,
 			expectedResponse: &corev1.CreateInstalledPackageResponse{
 				InstalledPackageRef: &corev1.InstalledPackageReference{
 					Context:    defaultContext,
@@ -5046,7 +5056,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&kappctrlv1alpha1.App{
@@ -5059,7 +5069,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Name:      "my-installation",
 					},
 					Spec: kappctrlv1alpha1.AppSpec{
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 					},
 					Status: kappctrlv1alpha1.AppStatus{
 						Deploy: &kappctrlv1alpha1.AppStatusDeploy{
@@ -5092,7 +5102,6 @@ func TestCreateInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.OK,
 			expectedResponse: &corev1.CreateInstalledPackageResponse{
 				InstalledPackageRef: &corev1.InstalledPackageReference{
 					Context:    defaultContext,
@@ -5204,7 +5213,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&kappctrlv1alpha1.App{
@@ -5217,7 +5226,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Name:      "my-installation",
 					},
 					Spec: kappctrlv1alpha1.AppSpec{
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 					},
 					Status: kappctrlv1alpha1.AppStatus{
 						Deploy: &kappctrlv1alpha1.AppStatusDeploy{
@@ -5250,7 +5259,6 @@ func TestCreateInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.OK,
 			expectedResponse: &corev1.CreateInstalledPackageResponse{
 				InstalledPackageRef: &corev1.InstalledPackageReference{
 					Context:    defaultContext,
@@ -5362,7 +5370,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&kappctrlv1alpha1.App{
@@ -5375,7 +5383,7 @@ func TestCreateInstalledPackage(t *testing.T) {
 						Name:      "my-installation",
 					},
 					Spec: kappctrlv1alpha1.AppSpec{
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 					},
 					Status: kappctrlv1alpha1.AppStatus{
 						Deploy: &kappctrlv1alpha1.AppStatusDeploy{
@@ -5408,7 +5416,6 @@ func TestCreateInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.OK,
 			expectedResponse: &corev1.CreateInstalledPackageResponse{
 				InstalledPackageRef: &corev1.InstalledPackageReference{
 					Context:    defaultContext,
@@ -5479,29 +5486,27 @@ func TestCreateInstalledPackage(t *testing.T) {
 
 			s := Server{
 				pluginConfig: tc.pluginConfig,
-				clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-					return clientgetter.NewBuilder().
-						WithTyped(typfake.NewSimpleClientset(tc.existingTypedObjects...)).
-						WithDynamic(dynamicClient).
-						Build(), nil
-				},
+				clientGetter: clientgetter.NewBuilder().
+					WithTyped(typfake.NewSimpleClientset(tc.existingTypedObjects...)).
+					WithDynamic(dynamicClient).
+					Build(),
 			}
 
-			createInstalledPackageResponse, err := s.CreateInstalledPackage(context.Background(), tc.request)
+			createInstalledPackageResponse, err := s.CreateInstalledPackage(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
 				t.Fatalf("got: %d, want: %d, err: %+v", got, want, err)
 			}
 			// If we were expecting an error, continue to the next test.
-			if tc.expectedStatusCode != codes.OK {
+			if tc.expectedErrorCode != 0 {
 				return
 			}
 			if tc.expectedPackageInstall != nil {
-				if got, want := createInstalledPackageResponse, tc.expectedResponse; !cmp.Equal(want, got, ignoreUnexported) {
+				if got, want := createInstalledPackageResponse.Msg, tc.expectedResponse; !cmp.Equal(want, got, ignoreUnexported) {
 					t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
 				}
 
-				createdPkgInstall, err := s.getPkgInstall(context.Background(), "default", tc.request.TargetContext.Namespace, createInstalledPackageResponse.InstalledPackageRef.Identifier)
+				createdPkgInstall, err := s.getPkgInstall(context.Background(), http.Header{}, "default", tc.request.TargetContext.Namespace, createInstalledPackageResponse.Msg.InstalledPackageRef.Identifier)
 				if err != nil {
 					t.Fatalf("%+v", err)
 				}
@@ -5521,7 +5526,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 		pluginConfig           *kappControllerPluginParsedConfig
 		existingObjects        []k8sruntime.Object
 		existingTypedObjects   []k8sruntime.Object
-		expectedStatusCode     codes.Code
+		expectedErrorCode      connect.Code
 		expectedResponse       *corev1.UpdateInstalledPackageResponse
 		expectedPackageInstall *packagingv1alpha1.PackageInstall
 	}{
@@ -5583,7 +5588,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&packagingv1alpha1.PackageInstall{
@@ -5611,7 +5616,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -5643,7 +5648,6 @@ func TestUpdateInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.OK,
 			expectedResponse: &corev1.UpdateInstalledPackageResponse{
 				InstalledPackageRef: &corev1.InstalledPackageReference{
 					Context:    defaultContext,
@@ -5676,7 +5680,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 					},
 					Paused:     false,
 					Canceled:   false,
-					SyncPeriod: &metav1.Duration{(time.Second * 30)},
+					SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 					NoopDelete: false,
 				},
 				Status: packagingv1alpha1.PackageInstallStatus{
@@ -5697,7 +5701,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 			},
 		},
 		{
-			name: "update installed package (non elegible version)",
+			name: "update installed package (non eligible version)",
 			request: &corev1.UpdateInstalledPackageRequest{
 				InstalledPackageRef: &corev1.InstalledPackageReference{
 					Context: &corev1.Context{
@@ -5758,7 +5762,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 						Licenses:                        []string{"my-license"},
 						ReleaseNotes:                    "release notes",
 						CapactiyRequirementsDescription: "capacity description",
-						ReleasedAt:                      metav1.Time{time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
+						ReleasedAt:                      metav1.Time{Time: time.Date(1984, time.June, 6, 0, 0, 0, 0, time.UTC)},
 					},
 				},
 				&packagingv1alpha1.PackageInstall{
@@ -5786,7 +5790,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -5818,7 +5822,7 @@ func TestUpdateInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 	}
 
@@ -5832,36 +5836,34 @@ func TestUpdateInstalledPackage(t *testing.T) {
 
 			s := Server{
 				pluginConfig: defaultPluginConfig,
-				clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-					return clientgetter.NewBuilder().
-						WithTyped(typfake.NewSimpleClientset(tc.existingTypedObjects...)).
-						WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
-							k8sruntime.NewScheme(),
-							map[schema.GroupVersionResource]string{
-								{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgsResource}:         pkgResource + "List",
-								{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgMetadatasResource}: pkgMetadataResource + "List",
-								{Group: packagingv1alpha1.SchemeGroupVersion.Group, Version: packagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgInstallsResource}:          pkgInstallResource + "List",
-							},
-							unstructuredObjects...,
-						)).Build(), nil
-				},
+				clientGetter: clientgetter.NewBuilder().
+					WithTyped(typfake.NewSimpleClientset(tc.existingTypedObjects...)).
+					WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
+						k8sruntime.NewScheme(),
+						map[schema.GroupVersionResource]string{
+							{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgsResource}:         pkgResource + "List",
+							{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgMetadatasResource}: pkgMetadataResource + "List",
+							{Group: packagingv1alpha1.SchemeGroupVersion.Group, Version: packagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgInstallsResource}:          pkgInstallResource + "List",
+						},
+						unstructuredObjects...,
+					)).Build(),
 			}
 
-			updateInstalledPackageResponse, err := s.UpdateInstalledPackage(context.Background(), tc.request)
+			updateInstalledPackageResponse, err := s.UpdateInstalledPackage(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
 				t.Fatalf("got: %d, want: %d, err: %+v", got, want, err)
 			}
 			// If we were expecting an error, continue to the next test.
-			if tc.expectedStatusCode != codes.OK {
+			if tc.expectedErrorCode != 0 {
 				return
 			}
 			if tc.expectedPackageInstall != nil {
-				if got, want := updateInstalledPackageResponse, tc.expectedResponse; !cmp.Equal(want, got, ignoreUnexported) {
+				if got, want := updateInstalledPackageResponse.Msg, tc.expectedResponse; !cmp.Equal(want, got, ignoreUnexported) {
 					t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
 				}
 
-				updatedPkgInstall, err := s.getPkgInstall(context.Background(), "default", updateInstalledPackageResponse.InstalledPackageRef.Context.Namespace, updateInstalledPackageResponse.InstalledPackageRef.Identifier)
+				updatedPkgInstall, err := s.getPkgInstall(context.Background(), http.Header{}, "default", updateInstalledPackageResponse.Msg.InstalledPackageRef.Context.Namespace, updateInstalledPackageResponse.Msg.InstalledPackageRef.Identifier)
 				if err != nil {
 					t.Fatalf("%+v", err)
 				}
@@ -5880,7 +5882,7 @@ func TestDeleteInstalledPackage(t *testing.T) {
 		request              *corev1.DeleteInstalledPackageRequest
 		existingObjects      []k8sruntime.Object
 		existingTypedObjects []k8sruntime.Object
-		expectedStatusCode   codes.Code
+		expectedErrorCode    connect.Code
 		expectedResponse     *corev1.DeleteInstalledPackageResponse
 	}{
 		{
@@ -5918,7 +5920,7 @@ func TestDeleteInstalledPackage(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -5950,8 +5952,7 @@ func TestDeleteInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.OK,
-			expectedResponse:   &corev1.DeleteInstalledPackageResponse{},
+			expectedResponse: &corev1.DeleteInstalledPackageResponse{},
 		},
 		{
 			name: "returns not found if installed package doesn't exist",
@@ -5988,7 +5989,7 @@ func TestDeleteInstalledPackage(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -6020,8 +6021,8 @@ func TestDeleteInstalledPackage(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.NotFound,
-			expectedResponse:   &corev1.DeleteInstalledPackageResponse{},
+			expectedErrorCode: connect.CodeNotFound,
+			expectedResponse:  &corev1.DeleteInstalledPackageResponse{},
 		},
 	}
 
@@ -6035,31 +6036,30 @@ func TestDeleteInstalledPackage(t *testing.T) {
 
 			s := Server{
 				pluginConfig: defaultPluginConfig,
-				clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-					return clientgetter.NewBuilder().
-						WithTyped(typfake.NewSimpleClientset(tc.existingTypedObjects...)).
-						WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
-							k8sruntime.NewScheme(),
-							map[schema.GroupVersionResource]string{
-								{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgsResource}:         pkgResource + "List",
-								{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgMetadatasResource}: pkgMetadataResource + "List",
-								{Group: packagingv1alpha1.SchemeGroupVersion.Group, Version: packagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgInstallsResource}:          pkgInstallResource + "List",
-							},
-							unstructuredObjects...,
-						)).Build(), nil
-				},
+				clientGetter: clientgetter.NewBuilder().
+					WithTyped(typfake.NewSimpleClientset(tc.existingTypedObjects...)).
+					WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
+						k8sruntime.NewScheme(),
+						map[schema.GroupVersionResource]string{
+							{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgsResource}:         pkgResource + "List",
+							{Group: datapackagingv1alpha1.SchemeGroupVersion.Group, Version: datapackagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgMetadatasResource}: pkgMetadataResource + "List",
+							{Group: packagingv1alpha1.SchemeGroupVersion.Group, Version: packagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgInstallsResource}:          pkgInstallResource + "List",
+						},
+						unstructuredObjects...,
+					)).
+					Build(),
 			}
 
-			deleteInstalledPackageResponse, err := s.DeleteInstalledPackage(context.Background(), tc.request)
+			deleteInstalledPackageResponse, err := s.DeleteInstalledPackage(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
 				t.Fatalf("got: %d, want: %d, err: %+v", got, want, err)
 			}
 			// If we were expecting an error, continue to the next test.
-			if tc.expectedStatusCode != codes.OK {
+			if tc.expectedErrorCode != 0 {
 				return
 			}
-			if got, want := deleteInstalledPackageResponse, tc.expectedResponse; !cmp.Equal(want, got, ignoreUnexported) {
+			if got, want := deleteInstalledPackageResponse.Msg, tc.expectedResponse; !cmp.Equal(want, got, ignoreUnexported) {
 				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
 			}
 		})
@@ -6072,7 +6072,7 @@ func TestGetInstalledPackageResourceRefs(t *testing.T) {
 		request              *corev1.GetInstalledPackageResourceRefsRequest
 		existingObjects      []k8sruntime.Object
 		existingTypedObjects []k8sruntime.Object
-		expectedStatusCode   codes.Code
+		expectedErrorCode    connect.Code
 		expectedResponse     *corev1.GetInstalledPackageResourceRefsResponse
 	}{
 		{
@@ -6110,7 +6110,7 @@ func TestGetInstalledPackageResourceRefs(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -6162,7 +6162,6 @@ func TestGetInstalledPackageResourceRefs(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.OK,
 			expectedResponse: &corev1.GetInstalledPackageResourceRefsResponse{
 				ResourceRefs: []*corev1.ResourceRef{
 					{
@@ -6210,7 +6209,7 @@ func TestGetInstalledPackageResourceRefs(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -6255,14 +6254,13 @@ func TestGetInstalledPackageResourceRefs(t *testing.T) {
 					},
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace: "default",
-						Name:      "my-installation.apps.k14s.io",
+						Name:      "my-installation.app",
 					},
 					Data: map[string]string{
 						"spec": "{\"labelKey\":\"kapp.k14s.io/app\",\"labelValue\":\"my-id\"}",
 					},
 				},
 			},
-			expectedStatusCode: codes.OK,
 			expectedResponse: &corev1.GetInstalledPackageResourceRefsResponse{
 				ResourceRefs: []*corev1.ResourceRef{
 					{
@@ -6310,7 +6308,7 @@ func TestGetInstalledPackageResourceRefs(t *testing.T) {
 						},
 						Paused:     false,
 						Canceled:   false,
-						SyncPeriod: &metav1.Duration{(time.Second * 30)},
+						SyncPeriod: &metav1.Duration{Duration: time.Second * 30},
 						NoopDelete: false,
 					},
 					Status: packagingv1alpha1.PackageInstallStatus{
@@ -6330,7 +6328,7 @@ func TestGetInstalledPackageResourceRefs(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.NotFound,
+			expectedErrorCode: connect.CodeNotFound,
 		},
 		{
 			name: "returns NotFound if app exists but no resources found",
@@ -6402,7 +6400,7 @@ func TestGetInstalledPackageResourceRefs(t *testing.T) {
 					},
 				},
 			},
-			expectedStatusCode: codes.NotFound,
+			expectedErrorCode: connect.CodeNotFound,
 		},
 	}
 
@@ -6446,13 +6444,11 @@ func TestGetInstalledPackageResourceRefs(t *testing.T) {
 
 			s := Server{
 				pluginConfig: defaultPluginConfig,
-				clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-					return clientgetter.NewBuilder().
-						WithTyped(typedClient).
-						WithDynamic(dynClient).
-						Build(), nil
-				},
-				kappClientsGetter: func(ctx context.Context, cluster, namespace string) (ctlapp.Apps, ctlres.IdentifiedResources, *kappcmdapp.FailingAPIServicesPolicy, ctlres.ResourceFilter, error) {
+				clientGetter: clientgetter.NewBuilder().
+					WithTyped(typedClient).
+					WithDynamic(dynClient).
+					Build(),
+				kappClientsGetter: func(headers http.Header, cluster, namespace string) (ctlapp.Apps, ctlres.IdentifiedResources, *kappcmdapp.FailingAPIServicesPolicy, ctlres.ResourceFilter, error) {
 					// Create a fake Kapp DepsFactory and configure there the fake k8s clients the hereinbefore created
 					depsFactory := NewFakeDepsFactoryImpl()
 					depsFactory.SetCoreClient(typedClient)
@@ -6461,35 +6457,35 @@ func TestGetInstalledPackageResourceRefs(t *testing.T) {
 					resourceFilterFlags := kappcmdtools.ResourceFilterFlags{}
 					resourceFilter, err := resourceFilterFlags.ResourceFilter()
 					if err != nil {
-						return ctlapp.Apps{}, ctlres.IdentifiedResources{}, nil, ctlres.ResourceFilter{}, status.Errorf(codes.FailedPrecondition, "unable to get config due to: %v", err)
+						return ctlapp.Apps{}, ctlres.IdentifiedResources{}, nil, ctlres.ResourceFilter{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("unable to get config due to: %w", err))
 					}
 					resourceTypesFlags := kappcmdapp.ResourceTypesFlags{
 						IgnoreFailingAPIServices:         true,
 						ScopeToFallbackAllowedNamespaces: true,
 					}
 					failingAPIServicesPolicy := resourceTypesFlags.FailingAPIServicePolicy()
-					supportingNsObjs, err := kappcmdapp.FactoryClients(depsFactory, kappcmdcore.NamespaceFlags{Name: namespace}, resourceTypesFlags, logger.NewNoopLogger())
+					supportingNsObjs, err := kappcmdapp.FactoryClients(depsFactory, kappcmdcore.NamespaceFlags{Name: namespace}, namespace, resourceTypesFlags, logger.NewNoopLogger())
 					if err != nil {
-						return ctlapp.Apps{}, ctlres.IdentifiedResources{}, nil, ctlres.ResourceFilter{}, status.Errorf(codes.FailedPrecondition, "unable to get config due to: %v", err)
+						return ctlapp.Apps{}, ctlres.IdentifiedResources{}, nil, ctlres.ResourceFilter{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("unable to get config due to: %w", err))
 					}
-					supportingObjs, err := kappcmdapp.FactoryClients(depsFactory, kappcmdcore.NamespaceFlags{Name: ""}, resourceTypesFlags, logger.NewNoopLogger())
+					supportingObjs, err := kappcmdapp.FactoryClients(depsFactory, kappcmdcore.NamespaceFlags{Name: ""}, "", resourceTypesFlags, logger.NewNoopLogger())
 					if err != nil {
-						return ctlapp.Apps{}, ctlres.IdentifiedResources{}, nil, ctlres.ResourceFilter{}, status.Errorf(codes.FailedPrecondition, "unable to get config due to: %v", err)
+						return ctlapp.Apps{}, ctlres.IdentifiedResources{}, nil, ctlres.ResourceFilter{}, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("unable to get config due to: %w", err))
 					}
 					return supportingNsObjs.Apps, supportingObjs.IdentifiedResources, failingAPIServicesPolicy, resourceFilter, nil
 				},
 			}
 
-			getInstalledPackageResourceRefsResponse, err := s.GetInstalledPackageResourceRefs(context.Background(), tc.request)
+			getInstalledPackageResourceRefsResponse, err := s.GetInstalledPackageResourceRefs(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
 				t.Fatalf("got: %d, want: %d, err: %+v", got, want, err)
 			}
 			// If we were expecting an error, continue to the next test.
-			if tc.expectedStatusCode != codes.OK {
+			if tc.expectedErrorCode != 0 {
 				return
 			}
-			if got, want := getInstalledPackageResourceRefsResponse, tc.expectedResponse; !cmp.Equal(want, got, ignoreUnexported) {
+			if got, want := getInstalledPackageResourceRefsResponse.Msg, tc.expectedResponse; !cmp.Equal(want, got, ignoreUnexported) {
 				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
 			}
 		})
@@ -6508,7 +6504,7 @@ func TestAddPackageRepository(t *testing.T) {
 		return &corev1.AddPackageRepositoryRequest{
 			Context:  defaultGlobalContext,
 			Name:     "globalrepo",
-			Type:     Type_ImgPkgBundle,
+			Type:     typeImgPkgBundle,
 			Url:      "projects.registry.example.com/repo-1/main@sha256:abcd",
 			Interval: "24h",
 			Plugin:   &pluginDetail,
@@ -6517,7 +6513,7 @@ func TestAddPackageRepository(t *testing.T) {
 	defaultRepository := func() *packagingv1alpha1.PackageRepository {
 		return &packagingv1alpha1.PackageRepository{
 			TypeMeta:   defaultTypeMeta,
-			ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: globalPackagingNamespace},
+			ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace},
 			Spec: packagingv1alpha1.PackageRepositorySpec{
 				SyncPeriod: &metav1.Duration{Duration: time.Duration(24) * time.Hour},
 				Fetch: &packagingv1alpha1.PackageRepositoryFetch{
@@ -6536,18 +6532,18 @@ func TestAddPackageRepository(t *testing.T) {
 		existingTypedObjects []k8sruntime.Object
 		requestCustomizer    func(request *corev1.AddPackageRepositoryRequest) *corev1.AddPackageRepositoryRequest
 		repositoryCustomizer func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository
-		expectedStatusCode   codes.Code
-		expectedStatusString string
+		expectedErrorCode    connect.Code
+		expectedErrorString  string
 		expectedRef          *corev1.PackageRepositoryReference
 		customChecks         func(t *testing.T, s *Server)
 	}{
 		{
 			name: "validate cluster",
 			requestCustomizer: func(request *corev1.AddPackageRepositoryRequest) *corev1.AddPackageRepositoryRequest {
-				request.Context = &corev1.Context{Cluster: "other", Namespace: globalPackagingNamespace}
+				request.Context = &corev1.Context{Cluster: "other", Namespace: demoGlobalPackagingNamespace}
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "validate name",
@@ -6555,15 +6551,7 @@ func TestAddPackageRepository(t *testing.T) {
 				request.Name = ""
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
-		},
-		{
-			name: "validate desc",
-			requestCustomizer: func(request *corev1.AddPackageRepositoryRequest) *corev1.AddPackageRepositoryRequest {
-				request.Description = "some description"
-				return request
-			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "validate scope",
@@ -6571,7 +6559,7 @@ func TestAddPackageRepository(t *testing.T) {
 				request.NamespaceScoped = true
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "validate scope",
@@ -6580,7 +6568,7 @@ func TestAddPackageRepository(t *testing.T) {
 				request.NamespaceScoped = false
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "validate tls config",
@@ -6588,14 +6576,14 @@ func TestAddPackageRepository(t *testing.T) {
 				request.TlsConfig = &corev1.PackageRepositoryTlsConfig{}
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "validate exists in global ns",
 			existingObjects: []k8sruntime.Object{
 				&packagingv1alpha1.PackageRepository{
 					TypeMeta:   defaultTypeMeta,
-					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: globalPackagingNamespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace},
 					Spec: packagingv1alpha1.PackageRepositorySpec{
 						Fetch: &packagingv1alpha1.PackageRepositoryFetch{
 							ImgpkgBundle: &kappctrlv1alpha1.AppFetchImgpkgBundle{
@@ -6609,7 +6597,7 @@ func TestAddPackageRepository(t *testing.T) {
 			requestCustomizer: func(request *corev1.AddPackageRepositoryRequest) *corev1.AddPackageRepositoryRequest {
 				return request
 			},
-			expectedStatusCode: codes.AlreadyExists,
+			expectedErrorCode: connect.CodeAlreadyExists,
 		},
 		{
 			name: "validate exists in private ns",
@@ -6633,7 +6621,7 @@ func TestAddPackageRepository(t *testing.T) {
 				request.NamespaceScoped = true
 				return request
 			},
-			expectedStatusCode: codes.AlreadyExists,
+			expectedErrorCode: connect.CodeAlreadyExists,
 		},
 		{
 			name: "validate url",
@@ -6641,7 +6629,7 @@ func TestAddPackageRepository(t *testing.T) {
 				request.Url = ""
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "validate type (empty)",
@@ -6649,7 +6637,7 @@ func TestAddPackageRepository(t *testing.T) {
 				request.Type = ""
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "validate type (invalid)",
@@ -6657,15 +6645,15 @@ func TestAddPackageRepository(t *testing.T) {
 				request.Type = "othertype"
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "validate type (inline)",
 			requestCustomizer: func(request *corev1.AddPackageRepositoryRequest) *corev1.AddPackageRepositoryRequest {
-				request.Type = Type_Inline
+				request.Type = typeInline
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "validate details (invalid type)",
@@ -6673,7 +6661,7 @@ func TestAddPackageRepository(t *testing.T) {
 				request.CustomDetail, _ = anypb.New(&corev1.AddPackageRepositoryRequest{})
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "validate details (type mismatch)",
@@ -6688,7 +6676,7 @@ func TestAddPackageRepository(t *testing.T) {
 				})
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "validate auth (type incompatibility)",
@@ -6698,8 +6686,8 @@ func TestAddPackageRepository(t *testing.T) {
 				}
 				return request
 			},
-			expectedStatusCode:   codes.InvalidArgument,
-			expectedStatusString: "Auth Type is incompatible",
+			expectedErrorCode:   connect.CodeInvalidArgument,
+			expectedErrorString: "Auth Type is incompatible",
 		},
 		{
 			name: "validate auth (user managed, invalid secret)",
@@ -6712,8 +6700,8 @@ func TestAddPackageRepository(t *testing.T) {
 				}
 				return request
 			},
-			expectedStatusCode:   codes.InvalidArgument,
-			expectedStatusString: "secret name is not provided",
+			expectedErrorCode:   connect.CodeInvalidArgument,
+			expectedErrorString: "the secret name is not provided",
 		},
 		{
 			name: "validate auth (user managed, secret does not exist)",
@@ -6728,8 +6716,8 @@ func TestAddPackageRepository(t *testing.T) {
 				}
 				return request
 			},
-			expectedStatusCode:   codes.InvalidArgument,
-			expectedStatusString: "not found",
+			expectedErrorCode:   connect.CodeInvalidArgument,
+			expectedErrorString: "not found",
 		},
 		{
 			name: "validate auth (user managed, secret is incompatible)",
@@ -6750,8 +6738,8 @@ func TestAddPackageRepository(t *testing.T) {
 				}
 				return request
 			},
-			expectedStatusCode:   codes.InvalidArgument,
-			expectedStatusString: "secret does not match",
+			expectedErrorCode:   connect.CodeInvalidArgument,
+			expectedErrorString: "the secret does not match",
 		},
 		{
 			name: "validate auth (plugin managed, invalid config, basic auth)",
@@ -6761,8 +6749,8 @@ func TestAddPackageRepository(t *testing.T) {
 				}
 				return request
 			},
-			expectedStatusCode:   codes.InvalidArgument,
-			expectedStatusString: "missing basic auth",
+			expectedErrorCode:   connect.CodeInvalidArgument,
+			expectedErrorString: "Missing basic auth",
 		},
 		{
 			name: "validate auth (plugin managed, invalid config, docker)",
@@ -6775,26 +6763,38 @@ func TestAddPackageRepository(t *testing.T) {
 				}
 				return request
 			},
-			expectedStatusCode:   codes.InvalidArgument,
-			expectedStatusString: "missing Docker Config auth",
+			expectedErrorCode:   connect.CodeInvalidArgument,
+			expectedErrorString: "Missing Docker Config auth",
 		},
 		{
 			name: "validate auth (plugin managed, invalid config, ssh auth)",
 			requestCustomizer: func(request *corev1.AddPackageRepositoryRequest) *corev1.AddPackageRepositoryRequest {
-				request.Type = Type_GIT
+				request.Type = typeGIT
 				request.Auth = &corev1.PackageRepositoryAuth{
 					Type: corev1.PackageRepositoryAuth_PACKAGE_REPOSITORY_AUTH_TYPE_SSH,
 					PackageRepoAuthOneOf: &corev1.PackageRepositoryAuth_SshCreds{
 						SshCreds: &corev1.SshCredentials{
-							PrivateKey: Redacted,
-							KnownHosts: Redacted,
+							PrivateKey: redacted,
+							KnownHosts: redacted,
 						},
 					},
 				}
 				return request
 			},
-			expectedStatusCode:   codes.InvalidArgument,
-			expectedStatusString: "unexpected REDACTED",
+			expectedErrorCode:   connect.CodeInvalidArgument,
+			expectedErrorString: "unexpected REDACTED",
+		},
+		{
+			name: "create with description",
+			requestCustomizer: func(request *corev1.AddPackageRepositoryRequest) *corev1.AddPackageRepositoryRequest {
+				request.Description = "repository description"
+				return request
+			},
+			repositoryCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
+				repository.Annotations = map[string]string{k8sutils.AnnotationDescriptionKey: "repository description"}
+				return repository
+			},
+			expectedRef: defaultRef,
 		},
 		{
 			name: "create with no interval",
@@ -6806,8 +6806,7 @@ func TestAddPackageRepository(t *testing.T) {
 				repository.Spec.SyncPeriod = nil
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "create with interval",
@@ -6819,8 +6818,7 @@ func TestAddPackageRepository(t *testing.T) {
 				repository.Spec.SyncPeriod = &metav1.Duration{Duration: time.Duration(12) * time.Hour}
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "create with url",
@@ -6832,13 +6830,12 @@ func TestAddPackageRepository(t *testing.T) {
 				repository.Spec.Fetch.ImgpkgBundle.Image = "foo"
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "create with details (imgpkg)",
 			requestCustomizer: func(request *corev1.AddPackageRepositoryRequest) *corev1.AddPackageRepositoryRequest {
-				request.Type = Type_ImgPkgBundle
+				request.Type = typeImgPkgBundle
 				request.Url = "projects.registry.example.com/repo-1/main@sha256:abcd"
 				request.CustomDetail, _ = anypb.New(&kappcorev1.KappControllerPackageRepositoryCustomDetail{
 					Fetch: &kappcorev1.PackageRepositoryFetch{
@@ -6872,13 +6869,12 @@ func TestAddPackageRepository(t *testing.T) {
 				}
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "create with details (image)",
 			requestCustomizer: func(request *corev1.AddPackageRepositoryRequest) *corev1.AddPackageRepositoryRequest {
-				request.Type = Type_Image
+				request.Type = typeImage
 				request.Url = "projects.registry.example.com/repo-1/main@sha256:abcd"
 				request.CustomDetail, _ = anypb.New(&kappcorev1.KappControllerPackageRepositoryCustomDetail{
 					Fetch: &kappcorev1.PackageRepositoryFetch{
@@ -6914,13 +6910,12 @@ func TestAddPackageRepository(t *testing.T) {
 				}
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "create with details (git)",
 			requestCustomizer: func(request *corev1.AddPackageRepositoryRequest) *corev1.AddPackageRepositoryRequest {
-				request.Type = Type_GIT
+				request.Type = typeGIT
 				request.Url = "https://github.com/projects.registry.vmware.com/tce/main"
 				request.CustomDetail, _ = anypb.New(&kappcorev1.KappControllerPackageRepositoryCustomDetail{
 					Fetch: &kappcorev1.PackageRepositoryFetch{
@@ -6960,13 +6955,12 @@ func TestAddPackageRepository(t *testing.T) {
 				}
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "create with details (http)",
 			requestCustomizer: func(request *corev1.AddPackageRepositoryRequest) *corev1.AddPackageRepositoryRequest {
-				request.Type = Type_HTTP
+				request.Type = typeHTTP
 				request.Url = "https://projects.registry.vmware.com/tce/main"
 				request.CustomDetail, _ = anypb.New(&kappcorev1.KappControllerPackageRepositoryCustomDetail{
 					Fetch: &kappcorev1.PackageRepositoryFetch{
@@ -6988,8 +6982,7 @@ func TestAddPackageRepository(t *testing.T) {
 				}
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "create with auth (user managed)",
@@ -7016,8 +7009,7 @@ func TestAddPackageRepository(t *testing.T) {
 				}
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "create with auth (plugin managed, basic auth)",
@@ -7037,17 +7029,45 @@ func TestAddPackageRepository(t *testing.T) {
 				repository.Spec.Fetch.ImgpkgBundle.SecretRef = &kappctrlv1alpha1.AppFetchLocalRef{} // the name will be empty as the fake client does not handle generating names
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 			customChecks: func(t *testing.T, s *Server) {
-				secret, err := s.getSecret(context.Background(), defaultGlobalContext.Cluster, globalPackagingNamespace, "")
+				secret, err := s.getSecret(context.Background(), http.Header{}, defaultGlobalContext.Cluster, demoGlobalPackagingNamespace, "")
 				if err != nil {
 					t.Fatalf("error fetching newly created secret:%+v", err)
 				}
 				if !isPluginManaged(defaultRepository(), secret) {
 					t.Errorf("annotations and ownership was not properly set: %+v", secret)
 				}
-				if secret.Type != k8scorev1.SecretTypeBasicAuth || secret.StringData[k8scorev1.BasicAuthUsernameKey] != "foo" || secret.StringData[k8scorev1.BasicAuthPasswordKey] != "bar" {
+				if secret.StringData[k8scorev1.BasicAuthUsernameKey] != "foo" || secret.StringData[k8scorev1.BasicAuthPasswordKey] != "bar" {
+					t.Errorf("secret data was not properly constructed: %+v", secret)
+				}
+			},
+		},
+		{
+			name: "create with auth (plugin managed, bearer auth)",
+			requestCustomizer: func(request *corev1.AddPackageRepositoryRequest) *corev1.AddPackageRepositoryRequest {
+				request.Auth = &corev1.PackageRepositoryAuth{
+					Type: corev1.PackageRepositoryAuth_PACKAGE_REPOSITORY_AUTH_TYPE_BEARER,
+					PackageRepoAuthOneOf: &corev1.PackageRepositoryAuth_Header{
+						Header: "foo",
+					},
+				}
+				return request
+			},
+			repositoryCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
+				repository.Spec.Fetch.ImgpkgBundle.SecretRef = &kappctrlv1alpha1.AppFetchLocalRef{} // the name will be empty as the fake client does not handle generating names
+				return repository
+			},
+			expectedRef: defaultRef,
+			customChecks: func(t *testing.T, s *Server) {
+				secret, err := s.getSecret(context.Background(), http.Header{}, defaultGlobalContext.Cluster, demoGlobalPackagingNamespace, "")
+				if err != nil {
+					t.Fatalf("error fetching newly created secret:%+v", err)
+				}
+				if !isPluginManaged(defaultRepository(), secret) {
+					t.Errorf("annotations and ownership was not properly set: %+v", secret)
+				}
+				if secret.Type != k8scorev1.SecretTypeOpaque || secret.StringData[bearerAuthToken] != "foo" {
 					t.Errorf("secret data was not properly constructed: %+v", secret)
 				}
 			},
@@ -7072,10 +7092,9 @@ func TestAddPackageRepository(t *testing.T) {
 				repository.Spec.Fetch.ImgpkgBundle.SecretRef = &kappctrlv1alpha1.AppFetchLocalRef{} // the name will be empty as the fake client does not handle generating names
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 			customChecks: func(t *testing.T, s *Server) {
-				secret, err := s.getSecret(context.Background(), defaultGlobalContext.Cluster, globalPackagingNamespace, "")
+				secret, err := s.getSecret(context.Background(), http.Header{}, defaultGlobalContext.Cluster, demoGlobalPackagingNamespace, "")
 				if err != nil {
 					t.Fatalf("error fetching newly created secret:%+v", err)
 				}
@@ -7108,33 +7127,33 @@ func TestAddPackageRepository(t *testing.T) {
 
 			s := Server{
 				pluginConfig: defaultPluginConfig,
-				clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-					return clientgetter.NewBuilder().WithTyped(typedClient).WithDynamic(dynamicClient).Build(), nil
-				},
-				globalPackagingCluster:   defaultGlobalContext.Cluster,
-				globalPackagingNamespace: defaultGlobalContext.Namespace,
+				clientGetter: clientgetter.NewBuilder().
+					WithTyped(typedClient).
+					WithDynamic(dynamicClient).
+					Build(),
+				globalPackagingCluster: defaultGlobalContext.Cluster,
 			}
 
 			request := tc.requestCustomizer(defaultRequest())
-			response, err := s.AddPackageRepository(context.Background(), request)
+			response, err := s.AddPackageRepository(context.Background(), connect.NewRequest(request))
 
 			// check status
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
 				t.Fatalf("got error: %d, want: %d, err: %+v", got, want, err)
-			} else if got != codes.OK {
-				if tc.expectedStatusString != "" && !strings.Contains(fmt.Sprint(err), tc.expectedStatusString) {
-					t.Fatalf("error without expected string: expected %s, err: %+v", tc.expectedStatusString, err)
+			} else if got != 0 {
+				if tc.expectedErrorString != "" && !strings.Contains(fmt.Sprint(err), tc.expectedErrorString) {
+					t.Fatalf("error without expected string: expected %s, err: %+v", tc.expectedErrorString, err)
 				}
 				return
 			}
 
 			// check ref
-			if got, want := response.GetPackageRepoRef(), tc.expectedRef; !cmp.Equal(want, got, ignoreUnexported) {
+			if got, want := response.Msg.GetPackageRepoRef(), tc.expectedRef; !cmp.Equal(want, got, ignoreUnexported) {
 				t.Errorf("response mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
 			}
 
 			// check repository
-			repository, err := s.getPkgRepository(context.Background(), tc.expectedRef.Context.Cluster, tc.expectedRef.Context.Namespace, tc.expectedRef.Identifier)
+			repository, err := s.getPkgRepository(context.Background(), http.Header{}, tc.expectedRef.Context.Cluster, tc.expectedRef.Context.Namespace, tc.expectedRef.Identifier)
 			if err != nil {
 				t.Fatalf("unexpected error retrieving repository: %+v", err)
 			}
@@ -7172,7 +7191,7 @@ func TestUpdatePackageRepository(t *testing.T) {
 	defaultRepository := func() *packagingv1alpha1.PackageRepository {
 		return &packagingv1alpha1.PackageRepository{
 			TypeMeta:   defaultTypeMeta,
-			ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: defaultGlobalContext.Namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: defaultGlobalContext.Namespace, UID: "globalrepo"},
 			Spec: packagingv1alpha1.PackageRepositorySpec{
 				SyncPeriod: &metav1.Duration{Duration: time.Duration(24) * time.Hour},
 				Fetch: &packagingv1alpha1.PackageRepositoryFetch{
@@ -7185,25 +7204,43 @@ func TestUpdatePackageRepository(t *testing.T) {
 		}
 	}
 
-	defaultSecret := func() *k8scorev1.Secret {
-		return &k8scorev1.Secret{
+	defaultSecret := func(name string, managed bool) *k8scorev1.Secret {
+		secret := &k8scorev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
-				Namespace:   defaultGlobalContext.Namespace,
-				Name:        "my-secret",
-				Annotations: map[string]string{Annotation_ManagedBy_Key: Annotation_ManagedBy_Value},
-				OwnerReferences: []metav1.OwnerReference{
-					{
-						APIVersion: defaultTypeMeta.APIVersion,
-						Kind:       defaultTypeMeta.Kind,
-						Name:       "globalrepo",
-						UID:        "globalrepo",
-						Controller: func() *bool { v := true; return &v }(),
-					},
-				},
+				Namespace: defaultGlobalContext.Namespace,
+				Name:      name,
 			},
 			Type: k8scorev1.SecretTypeOpaque,
 			Data: map[string][]byte{},
 		}
+		if managed {
+			secret.ObjectMeta.Annotations = map[string]string{annotationManagedByKey: annotationManagedByValue}
+			secret.ObjectMeta.OwnerReferences = []metav1.OwnerReference{
+				{
+					APIVersion: defaultTypeMeta.APIVersion,
+					Kind:       defaultTypeMeta.Kind,
+					Name:       "globalrepo",
+					UID:        "globalrepo",
+					Controller: func() *bool { v := true; return &v }(),
+				},
+			}
+		}
+		return secret
+	}
+	basicAuthSecret := func(secret *k8scorev1.Secret, username string, password string) *k8scorev1.Secret {
+		secret.Type = k8scorev1.SecretTypeBasicAuth
+		secret.Data = map[string][]byte{k8scorev1.BasicAuthUsernameKey: []byte(username), k8scorev1.BasicAuthPasswordKey: []byte(password)}
+		return secret
+	}
+	tokenAuthSecret := func(secret *k8scorev1.Secret, token string) *k8scorev1.Secret {
+		secret.Type = k8scorev1.SecretTypeOpaque
+		secret.Data = map[string][]byte{bearerAuthToken: []byte(token)}
+		return secret
+	}
+	dockerAuthSecret := func(secret *k8scorev1.Secret, dockerconfig string) *k8scorev1.Secret {
+		secret.Type = k8scorev1.SecretTypeDockerConfigJson
+		secret.Data = map[string][]byte{k8scorev1.DockerConfigJsonKey: []byte(dockerconfig)}
+		return secret
 	}
 
 	testCases := []struct {
@@ -7212,7 +7249,7 @@ func TestUpdatePackageRepository(t *testing.T) {
 		initialCustomizer    func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository
 		requestCustomizer    func(request *corev1.UpdatePackageRepositoryRequest) *corev1.UpdatePackageRepositoryRequest
 		repositoryCustomizer func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository
-		expectedStatusCode   codes.Code
+		expectedErrorCode    connect.Code
 		expectedStatusString string
 		expectedRef          *corev1.PackageRepositoryReference
 		customChecks         func(t *testing.T, s *Server)
@@ -7220,10 +7257,10 @@ func TestUpdatePackageRepository(t *testing.T) {
 		{
 			name: "validate cluster",
 			requestCustomizer: func(request *corev1.UpdatePackageRepositoryRequest) *corev1.UpdatePackageRepositoryRequest {
-				request.PackageRepoRef.Context = &corev1.Context{Cluster: "other", Namespace: globalPackagingNamespace}
+				request.PackageRepoRef.Context = &corev1.Context{Cluster: "other", Namespace: demoGlobalPackagingNamespace}
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "validate name",
@@ -7231,15 +7268,7 @@ func TestUpdatePackageRepository(t *testing.T) {
 				request.PackageRepoRef.Identifier = ""
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
-		},
-		{
-			name: "validate desc",
-			requestCustomizer: func(request *corev1.UpdatePackageRepositoryRequest) *corev1.UpdatePackageRepositoryRequest {
-				request.Description = "some description"
-				return request
-			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "validate url",
@@ -7247,7 +7276,7 @@ func TestUpdatePackageRepository(t *testing.T) {
 				request.Url = ""
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "validate tls config",
@@ -7255,7 +7284,24 @@ func TestUpdatePackageRepository(t *testing.T) {
 				request.TlsConfig = &corev1.PackageRepositoryTlsConfig{}
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
+		},
+		{
+			name: "validate auth (data provided with unspecified type)",
+			requestCustomizer: func(request *corev1.UpdatePackageRepositoryRequest) *corev1.UpdatePackageRepositoryRequest {
+				request.Auth = &corev1.PackageRepositoryAuth{
+					Type: corev1.PackageRepositoryAuth_PACKAGE_REPOSITORY_AUTH_TYPE_UNSPECIFIED,
+					PackageRepoAuthOneOf: &corev1.PackageRepositoryAuth_UsernamePassword{
+						UsernamePassword: &corev1.UsernamePassword{
+							Username: "foo",
+							Password: "bar",
+						},
+					},
+				}
+				return request
+			},
+			expectedErrorCode:    connect.CodeInvalidArgument,
+			expectedStatusString: "Auth Type is not specified but auth configuration data were provided",
 		},
 		{
 			name: "validate auth (type incompatibility)",
@@ -7265,12 +7311,14 @@ func TestUpdatePackageRepository(t *testing.T) {
 				}
 				return request
 			},
-			expectedStatusCode:   codes.InvalidArgument,
+			expectedErrorCode:    connect.CodeInvalidArgument,
 			expectedStatusString: "Auth Type is incompatible",
 		},
 		{
-			name:                 "validate auth (mode incompatibility)",
-			existingTypedObjects: []k8sruntime.Object{defaultSecret()},
+			name: "validate auth (mode incompatibility)",
+			existingTypedObjects: []k8sruntime.Object{
+				basicAuthSecret(defaultSecret("my-secret", false), "foo", "bar"),
+			},
 			initialCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
 				repository.Spec.Fetch.ImgpkgBundle.SecretRef = &kappctrlv1alpha1.AppFetchLocalRef{
 					Name: "my-secret",
@@ -7283,7 +7331,7 @@ func TestUpdatePackageRepository(t *testing.T) {
 				}
 				return request
 			},
-			expectedStatusCode:   codes.InvalidArgument,
+			expectedErrorCode:    connect.CodeInvalidArgument,
 			expectedStatusString: "management mode cannot be changed",
 		},
 		{
@@ -7297,8 +7345,8 @@ func TestUpdatePackageRepository(t *testing.T) {
 				}
 				return request
 			},
-			expectedStatusCode:   codes.InvalidArgument,
-			expectedStatusString: "secret name is not provided",
+			expectedErrorCode:    connect.CodeInvalidArgument,
+			expectedStatusString: "the secret name is not provided",
 		},
 		{
 			name: "validate auth (user managed, secret does not exist)",
@@ -7313,16 +7361,13 @@ func TestUpdatePackageRepository(t *testing.T) {
 				}
 				return request
 			},
-			expectedStatusCode:   codes.InvalidArgument,
+			expectedErrorCode:    connect.CodeInvalidArgument,
 			expectedStatusString: "not found",
 		},
 		{
 			name: "validate auth (user managed, secret is incompatible)",
 			existingTypedObjects: []k8sruntime.Object{
-				&k8scorev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{Namespace: defaultGlobalContext.Namespace, Name: "my-secret"},
-					Data:       map[string][]byte{k8scorev1.BasicAuthUsernameKey: []byte("foo"), k8scorev1.BasicAuthPasswordKey: []byte("bar")},
-				},
+				basicAuthSecret(defaultSecret("my-secret", false), "foo", "bar"),
 			},
 			requestCustomizer: func(request *corev1.UpdatePackageRepositoryRequest) *corev1.UpdatePackageRepositoryRequest {
 				request.Auth = &corev1.PackageRepositoryAuth{
@@ -7335,8 +7380,8 @@ func TestUpdatePackageRepository(t *testing.T) {
 				}
 				return request
 			},
-			expectedStatusCode:   codes.InvalidArgument,
-			expectedStatusString: "secret does not match",
+			expectedErrorCode:    connect.CodeInvalidArgument,
+			expectedStatusString: "the secret does not match",
 		},
 		{
 			name: "validate auth (plugin managed, invalid config, basic auth)",
@@ -7346,8 +7391,8 @@ func TestUpdatePackageRepository(t *testing.T) {
 				}
 				return request
 			},
-			expectedStatusCode:   codes.InvalidArgument,
-			expectedStatusString: "missing basic auth",
+			expectedErrorCode:    connect.CodeInvalidArgument,
+			expectedStatusString: "Missing basic auth",
 		},
 		{
 			name: "validate auth (plugin managed, invalid config, docker)",
@@ -7358,44 +7403,14 @@ func TestUpdatePackageRepository(t *testing.T) {
 						DockerCreds: &corev1.DockerCredentials{
 							Username: "foo",
 							Password: "bar",
-							Server:   Redacted,
+							Server:   redacted,
 						},
 					},
 				}
 				return request
 			},
-			expectedStatusCode:   codes.InvalidArgument,
+			expectedErrorCode:    connect.CodeInvalidArgument,
 			expectedStatusString: "unexpected REDACTED",
-		},
-		{
-			name: "validate (plugin managed, type changed)",
-			existingTypedObjects: []k8sruntime.Object{
-				func() *k8scorev1.Secret {
-					s := defaultSecret()
-					s.Type = k8scorev1.SecretTypeBasicAuth
-					s.Data[k8scorev1.BasicAuthUsernameKey] = []byte("foo")
-					s.Data[k8scorev1.BasicAuthPasswordKey] = []byte("bar")
-					return s
-				}(),
-			},
-			initialCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
-				repository.ObjectMeta.UID = "globalrepo"
-				repository.Spec.Fetch.ImgpkgBundle.SecretRef = &kappctrlv1alpha1.AppFetchLocalRef{
-					Name: "my-secret",
-				}
-				return repository
-			},
-			requestCustomizer: func(request *corev1.UpdatePackageRepositoryRequest) *corev1.UpdatePackageRepositoryRequest {
-				request.Auth = &corev1.PackageRepositoryAuth{
-					Type: corev1.PackageRepositoryAuth_PACKAGE_REPOSITORY_AUTH_TYPE_BEARER,
-					PackageRepoAuthOneOf: &corev1.PackageRepositoryAuth_Header{
-						Header: "eXYZ",
-					},
-				}
-				return request
-			},
-			expectedStatusCode:   codes.InvalidArgument,
-			expectedStatusString: "type cannot be changed",
 		},
 		{
 			name: "validate not found",
@@ -7403,7 +7418,7 @@ func TestUpdatePackageRepository(t *testing.T) {
 				request.PackageRepoRef.Identifier = "foo"
 				return request
 			},
-			expectedStatusCode: codes.NotFound,
+			expectedErrorCode: connect.CodeNotFound,
 		},
 		{
 			name: "validate details (invalid type)",
@@ -7411,7 +7426,7 @@ func TestUpdatePackageRepository(t *testing.T) {
 				request.CustomDetail, _ = anypb.New(&corev1.UpdatePackageRepositoryRequest{})
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "validate details (type mismatch)",
@@ -7426,7 +7441,7 @@ func TestUpdatePackageRepository(t *testing.T) {
 				})
 				return request
 			},
-			expectedStatusCode: codes.InvalidArgument,
+			expectedErrorCode: connect.CodeInvalidArgument,
 		},
 		{
 			name: "validate pending status",
@@ -7442,8 +7457,40 @@ func TestUpdatePackageRepository(t *testing.T) {
 				}
 				return repository
 			},
-			expectedStatusCode:   codes.FailedPrecondition,
+			expectedErrorCode:    connect.CodeFailedPrecondition,
 			expectedStatusString: "not in a stable state",
+		},
+		{
+			name: "update with new description",
+			initialCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
+				repository.Annotations = map[string]string{k8sutils.AnnotationDescriptionKey: "initial description"}
+				return repository
+			},
+			requestCustomizer: func(request *corev1.UpdatePackageRepositoryRequest) *corev1.UpdatePackageRepositoryRequest {
+				request.Description = "updated description"
+				return request
+			},
+			repositoryCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
+				repository.Annotations = map[string]string{k8sutils.AnnotationDescriptionKey: "updated description"}
+				return repository
+			},
+			expectedRef: defaultRef,
+		},
+		{
+			name: "update remove description",
+			initialCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
+				repository.Annotations = map[string]string{k8sutils.AnnotationDescriptionKey: "initial description"}
+				return repository
+			},
+			requestCustomizer: func(request *corev1.UpdatePackageRepositoryRequest) *corev1.UpdatePackageRepositoryRequest {
+				request.Description = ""
+				return request
+			},
+			repositoryCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
+				repository.Annotations = nil
+				return repository
+			},
+			expectedRef: defaultRef,
 		},
 		{
 			name: "update with no interval",
@@ -7455,8 +7502,7 @@ func TestUpdatePackageRepository(t *testing.T) {
 				repository.Spec.SyncPeriod = nil
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "updated with new interval",
@@ -7468,8 +7514,7 @@ func TestUpdatePackageRepository(t *testing.T) {
 				repository.Spec.SyncPeriod = &metav1.Duration{Duration: time.Duration(12) * time.Hour}
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "updated with new url",
@@ -7481,8 +7526,7 @@ func TestUpdatePackageRepository(t *testing.T) {
 				repository.Spec.Fetch.ImgpkgBundle.Image = "foo"
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "create with details (imgpkg)",
@@ -7528,8 +7572,7 @@ func TestUpdatePackageRepository(t *testing.T) {
 				}
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "create with details (image)",
@@ -7577,8 +7620,7 @@ func TestUpdatePackageRepository(t *testing.T) {
 				}
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "create with details (git)",
@@ -7630,8 +7672,7 @@ func TestUpdatePackageRepository(t *testing.T) {
 				}
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "create with details (http)",
@@ -7665,16 +7706,12 @@ func TestUpdatePackageRepository(t *testing.T) {
 				}
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "updated with auth (user managed, added)",
 			existingTypedObjects: []k8sruntime.Object{
-				&k8scorev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{Namespace: defaultGlobalContext.Namespace, Name: "my-secret"},
-					Data:       map[string][]byte{k8scorev1.BasicAuthUsernameKey: []byte("foo"), k8scorev1.BasicAuthPasswordKey: []byte("bar")},
-				},
+				basicAuthSecret(defaultSecret("my-secret", false), "foo", "bar"),
 			},
 			requestCustomizer: func(request *corev1.UpdatePackageRepositoryRequest) *corev1.UpdatePackageRepositoryRequest {
 				request.Auth = &corev1.PackageRepositoryAuth{
@@ -7693,20 +7730,13 @@ func TestUpdatePackageRepository(t *testing.T) {
 				}
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "updated with auth (user managed, updated)",
 			existingTypedObjects: []k8sruntime.Object{
-				&k8scorev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{Namespace: defaultGlobalContext.Namespace, Name: "my-secret"},
-					Data:       map[string][]byte{k8scorev1.BasicAuthUsernameKey: []byte("foo"), k8scorev1.BasicAuthPasswordKey: []byte("bar")},
-				},
-				&k8scorev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{Namespace: defaultGlobalContext.Namespace, Name: "my-secret-2"},
-					Data:       map[string][]byte{k8scorev1.DockerConfigJsonKey: []byte("{}")},
-				},
+				basicAuthSecret(defaultSecret("my-secret", false), "foo", "bar"),
+				dockerAuthSecret(defaultSecret("my-secret-2", false), "{}"),
 			},
 			initialCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
 				repository.Spec.Fetch.ImgpkgBundle.SecretRef = &kappctrlv1alpha1.AppFetchLocalRef{
@@ -7731,16 +7761,12 @@ func TestUpdatePackageRepository(t *testing.T) {
 				}
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "updated with auth (user managed, removed)",
 			existingTypedObjects: []k8sruntime.Object{
-				&k8scorev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{Namespace: defaultGlobalContext.Namespace, Name: "my-secret"},
-					Data:       map[string][]byte{k8scorev1.BasicAuthUsernameKey: []byte("foo"), k8scorev1.BasicAuthPasswordKey: []byte("bar")},
-				},
+				basicAuthSecret(defaultSecret("my-secret", false), "foo", "bar"),
 			},
 			initialCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
 				repository.Spec.Fetch.ImgpkgBundle.SecretRef = &kappctrlv1alpha1.AppFetchLocalRef{
@@ -7752,8 +7778,7 @@ func TestUpdatePackageRepository(t *testing.T) {
 				repository.Spec.Fetch.ImgpkgBundle.SecretRef = nil
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "updated with auth (plugin managed, added)",
@@ -7773,50 +7798,78 @@ func TestUpdatePackageRepository(t *testing.T) {
 				repository.Spec.Fetch.ImgpkgBundle.SecretRef = &kappctrlv1alpha1.AppFetchLocalRef{} // the name will be empty as the fake client does not handle generating names
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 			customChecks: func(t *testing.T, s *Server) {
-				secret, err := s.getSecret(context.Background(), defaultGlobalContext.Cluster, globalPackagingNamespace, "")
+				secret, err := s.getSecret(context.Background(), http.Header{}, defaultGlobalContext.Cluster, demoGlobalPackagingNamespace, "")
 				if err != nil {
 					t.Fatalf("error fetching newly created secret:%+v", err)
 				}
 				if !isPluginManaged(defaultRepository(), secret) {
 					t.Errorf("annotations and ownership was not properly set: %+v", secret)
 				}
-				if secret.Type != k8scorev1.SecretTypeBasicAuth || secret.StringData[k8scorev1.BasicAuthUsernameKey] != "foo" || secret.StringData[k8scorev1.BasicAuthPasswordKey] != "bar" {
+				if secret.Type != k8scorev1.SecretTypeOpaque || secret.StringData[k8scorev1.BasicAuthUsernameKey] != "foo" || secret.StringData[k8scorev1.BasicAuthPasswordKey] != "bar" {
 					t.Errorf("secret data was not properly constructed: %+v", secret)
 				}
 			},
 		},
 		{
-			name:                 "updated with auth (plugin managed, removed)",
-			existingTypedObjects: []k8sruntime.Object{defaultSecret()},
+			name: "updated with auth (plugin managed, bearer auth)",
+			requestCustomizer: func(request *corev1.UpdatePackageRepositoryRequest) *corev1.UpdatePackageRepositoryRequest {
+				request.Auth = &corev1.PackageRepositoryAuth{
+					Type: corev1.PackageRepositoryAuth_PACKAGE_REPOSITORY_AUTH_TYPE_BEARER,
+					PackageRepoAuthOneOf: &corev1.PackageRepositoryAuth_Header{
+						Header: "foo",
+					},
+				}
+				return request
+			},
+			repositoryCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
+				repository.Spec.Fetch.ImgpkgBundle.SecretRef = &kappctrlv1alpha1.AppFetchLocalRef{} // the name will be empty as the fake client does not handle generating names
+				return repository
+			},
+			expectedRef: defaultRef,
+			customChecks: func(t *testing.T, s *Server) {
+				secret, err := s.getSecret(context.Background(), http.Header{}, defaultGlobalContext.Cluster, demoGlobalPackagingNamespace, "")
+				if err != nil {
+					t.Fatalf("error fetching newly created secret:%+v", err)
+				}
+				if !isPluginManaged(defaultRepository(), secret) {
+					t.Errorf("annotations and ownership was not properly set: %+v", secret)
+				}
+				if secret.Type != k8scorev1.SecretTypeOpaque || secret.StringData[bearerAuthToken] != "foo" {
+					t.Errorf("secret data was not properly constructed: %+v", secret)
+				}
+			},
+		},
+		{
+			name: "updated with auth (plugin managed, removed)",
+			existingTypedObjects: []k8sruntime.Object{
+				basicAuthSecret(defaultSecret("my-secret", true), "foo", "bar"),
+			},
 			initialCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
 				repository.Spec.Fetch.ImgpkgBundle.SecretRef = &kappctrlv1alpha1.AppFetchLocalRef{
 					Name: "my-secret",
 				}
 				return repository
 			},
+			requestCustomizer: func(request *corev1.UpdatePackageRepositoryRequest) *corev1.UpdatePackageRepositoryRequest {
+				request.Auth = &corev1.PackageRepositoryAuth{
+					Type: corev1.PackageRepositoryAuth_PACKAGE_REPOSITORY_AUTH_TYPE_UNSPECIFIED,
+				}
+				return request
+			},
 			repositoryCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
 				repository.Spec.Fetch.ImgpkgBundle.SecretRef = nil
 				return repository
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 		},
 		{
 			name: "updated with auth (plugin managed, update unchanged)",
 			existingTypedObjects: []k8sruntime.Object{
-				func() *k8scorev1.Secret {
-					s := defaultSecret()
-					s.Type = k8scorev1.SecretTypeBasicAuth
-					s.Data[k8scorev1.BasicAuthUsernameKey] = []byte("foo")
-					s.Data[k8scorev1.BasicAuthPasswordKey] = []byte("bar")
-					return s
-				}(),
+				basicAuthSecret(defaultSecret("my-secret", true), "foo", "bar"),
 			},
 			initialCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
-				repository.ObjectMeta.UID = "globalrepo"
 				repository.Spec.Fetch.ImgpkgBundle.SecretRef = &kappctrlv1alpha1.AppFetchLocalRef{
 					Name: "my-secret",
 				}
@@ -7827,17 +7880,16 @@ func TestUpdatePackageRepository(t *testing.T) {
 					Type: corev1.PackageRepositoryAuth_PACKAGE_REPOSITORY_AUTH_TYPE_BASIC_AUTH,
 					PackageRepoAuthOneOf: &corev1.PackageRepositoryAuth_UsernamePassword{
 						UsernamePassword: &corev1.UsernamePassword{
-							Username: Redacted,
-							Password: Redacted,
+							Username: redacted,
+							Password: redacted,
 						},
 					},
 				}
 				return request
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			expectedRef: defaultRef,
 			customChecks: func(t *testing.T, s *Server) {
-				secret, err := s.getSecret(context.Background(), defaultGlobalContext.Cluster, globalPackagingNamespace, "my-secret")
+				secret, err := s.getSecret(context.Background(), http.Header{}, defaultGlobalContext.Cluster, demoGlobalPackagingNamespace, "my-secret")
 				if err != nil {
 					t.Fatalf("error fetching secret:%+v", err)
 				}
@@ -7848,18 +7900,11 @@ func TestUpdatePackageRepository(t *testing.T) {
 			},
 		},
 		{
-			name: "updated with auth (plugin managed, update some changes)",
+			name: "updated with auth (plugin managed, mixed redacted/updated)",
 			existingTypedObjects: []k8sruntime.Object{
-				func() *k8scorev1.Secret {
-					s := defaultSecret()
-					s.Type = k8scorev1.SecretTypeBasicAuth
-					s.Data[k8scorev1.BasicAuthUsernameKey] = []byte("foo")
-					s.Data[k8scorev1.BasicAuthPasswordKey] = []byte("bar2")
-					return s
-				}(),
+				basicAuthSecret(defaultSecret("my-secret", true), "foo", "bar"),
 			},
 			initialCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
-				repository.ObjectMeta.UID = "globalrepo"
 				repository.Spec.Fetch.ImgpkgBundle.SecretRef = &kappctrlv1alpha1.AppFetchLocalRef{
 					Name: "my-secret",
 				}
@@ -7870,21 +7915,133 @@ func TestUpdatePackageRepository(t *testing.T) {
 					Type: corev1.PackageRepositoryAuth_PACKAGE_REPOSITORY_AUTH_TYPE_BASIC_AUTH,
 					PackageRepoAuthOneOf: &corev1.PackageRepositoryAuth_UsernamePassword{
 						UsernamePassword: &corev1.UsernamePassword{
-							Username: Redacted,
+							Username: redacted,
 							Password: "bar2",
 						},
 					},
 				}
 				return request
 			},
-			expectedStatusCode: codes.OK,
-			expectedRef:        defaultRef,
+			repositoryCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
+				repository.Spec.Fetch.ImgpkgBundle.SecretRef = &kappctrlv1alpha1.AppFetchLocalRef{} // the name will be empty as the fake client does not handle generating names
+				return repository
+			},
+			expectedRef: defaultRef,
 			customChecks: func(t *testing.T, s *Server) {
-				secret, err := s.getSecret(context.Background(), defaultGlobalContext.Cluster, globalPackagingNamespace, "my-secret")
+				secret, err := s.getSecret(context.Background(), http.Header{}, defaultGlobalContext.Cluster, demoGlobalPackagingNamespace, "")
 				if err != nil {
 					t.Fatalf("error fetching secret:%+v", err)
 				}
-				if secret.Type != k8scorev1.SecretTypeBasicAuth || secret.StringData[k8scorev1.BasicAuthPasswordKey] != "bar2" {
+				if secret.Type != k8scorev1.SecretTypeOpaque || secret.StringData[k8scorev1.BasicAuthPasswordKey] != "bar2" {
+					t.Errorf("secret data not as expected: %+v", secret)
+				}
+			},
+		},
+		{
+			name: "updated with new auth type (plugin managed, update basic to token)",
+			existingTypedObjects: []k8sruntime.Object{
+				basicAuthSecret(defaultSecret("my-secret", true), "foo", "bar"),
+			},
+			initialCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
+				repository.Spec.Fetch.ImgpkgBundle.SecretRef = &kappctrlv1alpha1.AppFetchLocalRef{
+					Name: "my-secret",
+				}
+				return repository
+			},
+			requestCustomizer: func(request *corev1.UpdatePackageRepositoryRequest) *corev1.UpdatePackageRepositoryRequest {
+				request.Auth = &corev1.PackageRepositoryAuth{
+					Type: corev1.PackageRepositoryAuth_PACKAGE_REPOSITORY_AUTH_TYPE_BEARER,
+					PackageRepoAuthOneOf: &corev1.PackageRepositoryAuth_Header{
+						Header: "zot",
+					},
+				}
+				return request
+			},
+			repositoryCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
+				repository.Spec.Fetch.ImgpkgBundle.SecretRef = &kappctrlv1alpha1.AppFetchLocalRef{} // the name will be empty as the fake client does not handle generating names
+				return repository
+			},
+			expectedRef: defaultRef,
+			customChecks: func(t *testing.T, s *Server) {
+				secret, err := s.getSecret(context.Background(), http.Header{}, defaultGlobalContext.Cluster, demoGlobalPackagingNamespace, "")
+				if err != nil {
+					t.Fatalf("error fetching secret:%+v", err)
+				}
+				if secret.Type != k8scorev1.SecretTypeOpaque || secret.StringData[bearerAuthToken] != "zot" {
+					t.Errorf("secret data not as expected: %+v", secret)
+				}
+			},
+		},
+		{
+			name: "updated with new auth type (plugin managed, invalid use of redacted)",
+			existingTypedObjects: []k8sruntime.Object{
+				tokenAuthSecret(defaultSecret("my-secret", true), "zot"),
+			},
+			initialCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
+				repository.Spec.Fetch.ImgpkgBundle.SecretRef = &kappctrlv1alpha1.AppFetchLocalRef{
+					Name: "my-secret",
+				}
+				return repository
+			},
+			requestCustomizer: func(request *corev1.UpdatePackageRepositoryRequest) *corev1.UpdatePackageRepositoryRequest {
+				request.Auth = &corev1.PackageRepositoryAuth{
+					Type: corev1.PackageRepositoryAuth_PACKAGE_REPOSITORY_AUTH_TYPE_BASIC_AUTH,
+					PackageRepoAuthOneOf: &corev1.PackageRepositoryAuth_UsernamePassword{
+						UsernamePassword: &corev1.UsernamePassword{
+							Username: redacted,
+							Password: "bar",
+						},
+					},
+				}
+				return request
+			},
+			expectedErrorCode:    connect.CodeInvalidArgument,
+			expectedStatusString: "unexpected REDACTED content",
+		},
+		{
+			name: "updated with new auth type (plugin managed, update basic to ssh, git spec)",
+			existingTypedObjects: []k8sruntime.Object{
+				basicAuthSecret(defaultSecret("my-secret", true), "foo", "bar"),
+			},
+			initialCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
+				repository.Spec.Fetch = &packagingv1alpha1.PackageRepositoryFetch{
+					Git: &kappctrlv1alpha1.AppFetchGit{
+						URL: "http://github.com/repo-1/main",
+						SecretRef: &kappctrlv1alpha1.AppFetchLocalRef{
+							Name: "my-secret",
+						},
+					},
+				}
+				return repository
+			},
+			requestCustomizer: func(request *corev1.UpdatePackageRepositoryRequest) *corev1.UpdatePackageRepositoryRequest {
+				request.Url = "http://github.com/repo-1/main"
+				request.Auth = &corev1.PackageRepositoryAuth{
+					Type: corev1.PackageRepositoryAuth_PACKAGE_REPOSITORY_AUTH_TYPE_SSH,
+					PackageRepoAuthOneOf: &corev1.PackageRepositoryAuth_SshCreds{
+						SshCreds: &corev1.SshCredentials{
+							PrivateKey: "ssh-key",
+						},
+					},
+				}
+				return request
+			},
+			repositoryCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
+				repository.Spec.Fetch = &packagingv1alpha1.PackageRepositoryFetch{
+					Git: &kappctrlv1alpha1.AppFetchGit{
+						URL:       "http://github.com/repo-1/main",
+						SecretRef: &kappctrlv1alpha1.AppFetchLocalRef{}, // the name will be empty as the fake client does not handle generating names
+					},
+				}
+				return repository
+			},
+			expectedRef: defaultRef,
+			customChecks: func(t *testing.T, s *Server) {
+				secret, err := s.getSecret(context.Background(), http.Header{}, defaultGlobalContext.Cluster, demoGlobalPackagingNamespace, "")
+				if err != nil {
+					t.Fatalf("error fetching secret:%+v", err)
+				}
+				if secret.Type != k8scorev1.SecretTypeOpaque || secret.StringData[k8scorev1.SSHAuthPrivateKey] != "ssh-key" {
 					t.Errorf("secret data not as expected: %+v", secret)
 				}
 			},
@@ -7915,11 +8072,11 @@ func TestUpdatePackageRepository(t *testing.T) {
 
 			s := Server{
 				pluginConfig: defaultPluginConfig,
-				clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-					return clientgetter.NewBuilder().WithTyped(typedClient).WithDynamic(dynamicClient).Build(), nil
-				},
-				globalPackagingCluster:   defaultGlobalContext.Cluster,
-				globalPackagingNamespace: defaultGlobalContext.Namespace,
+				clientGetter: clientgetter.NewBuilder().
+					WithTyped(typedClient).
+					WithDynamic(dynamicClient).
+					Build(),
+				globalPackagingCluster: defaultGlobalContext.Cluster,
 			}
 
 			// prepare request
@@ -7929,12 +8086,12 @@ func TestUpdatePackageRepository(t *testing.T) {
 			}
 
 			// invoke
-			response, err := s.UpdatePackageRepository(context.Background(), request)
+			response, err := s.UpdatePackageRepository(context.Background(), connect.NewRequest(request))
 
 			// check status
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
 				t.Fatalf("got error: %d, want: %d, err: %+v", got, want, err)
-			} else if got != codes.OK {
+			} else if got != 0 {
 				if tc.expectedStatusString != "" && !strings.Contains(fmt.Sprint(err), tc.expectedStatusString) {
 					t.Fatalf("error without expected string: expected %s, err: %+v", tc.expectedStatusString, err)
 				}
@@ -7942,12 +8099,12 @@ func TestUpdatePackageRepository(t *testing.T) {
 			}
 
 			// check ref
-			if got, want := response.GetPackageRepoRef(), tc.expectedRef; !cmp.Equal(want, got, ignoreUnexported) {
+			if got, want := response.Msg.GetPackageRepoRef(), tc.expectedRef; !cmp.Equal(want, got, ignoreUnexported) {
 				t.Errorf("response mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
 			}
 
 			// check repository
-			pkgrepository, err := s.getPkgRepository(context.Background(), tc.expectedRef.Context.Cluster, tc.expectedRef.Context.Namespace, tc.expectedRef.Identifier)
+			pkgrepository, err := s.getPkgRepository(context.Background(), http.Header{}, tc.expectedRef.Context.Cluster, tc.expectedRef.Context.Namespace, tc.expectedRef.Identifier)
 			if err != nil {
 				t.Fatalf("unexpected error retrieving repository: %+v", err)
 			}
@@ -7972,7 +8129,7 @@ func TestDeletePackageRepository(t *testing.T) {
 	defaultRepository := func() *packagingv1alpha1.PackageRepository {
 		return &packagingv1alpha1.PackageRepository{
 			TypeMeta:   defaultTypeMeta,
-			ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: globalPackagingNamespace},
+			ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace},
 			Spec: packagingv1alpha1.PackageRepositorySpec{
 				Fetch: &packagingv1alpha1.PackageRepositoryFetch{
 					ImgpkgBundle: &kappctrlv1alpha1.AppFetchImgpkgBundle{
@@ -7985,10 +8142,10 @@ func TestDeletePackageRepository(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name               string
-		existingObjects    []k8sruntime.Object
-		request            *corev1.DeletePackageRepositoryRequest
-		expectedStatusCode codes.Code
+		name              string
+		existingObjects   []k8sruntime.Object
+		request           *corev1.DeletePackageRepositoryRequest
+		expectedErrorCode connect.Code
 	}{
 		{
 			name:            "delete - success",
@@ -8000,7 +8157,6 @@ func TestDeletePackageRepository(t *testing.T) {
 					Identifier: "globalrepo",
 				},
 			},
-			expectedStatusCode: codes.OK,
 		},
 		{
 			name:            "delete - not found (empty)",
@@ -8012,7 +8168,7 @@ func TestDeletePackageRepository(t *testing.T) {
 					Identifier: "globalrepo",
 				},
 			},
-			expectedStatusCode: codes.NotFound,
+			expectedErrorCode: connect.CodeNotFound,
 		},
 		{
 			name:            "delete - not found (different)",
@@ -8024,7 +8180,7 @@ func TestDeletePackageRepository(t *testing.T) {
 					Identifier: "globalrepo2",
 				},
 			},
-			expectedStatusCode: codes.NotFound,
+			expectedErrorCode: connect.CodeNotFound,
 		},
 		{
 			name: "delete - with user managed secret",
@@ -8041,7 +8197,6 @@ func TestDeletePackageRepository(t *testing.T) {
 					Identifier: "globalrepo",
 				},
 			},
-			expectedStatusCode: codes.OK,
 		},
 		{
 			name: "delete - with plugin managed secret",
@@ -8059,7 +8214,6 @@ func TestDeletePackageRepository(t *testing.T) {
 					Identifier: "globalrepo",
 				},
 			},
-			expectedStatusCode: codes.OK,
 		},
 	}
 
@@ -8080,17 +8234,15 @@ func TestDeletePackageRepository(t *testing.T) {
 			)
 			s := Server{
 				pluginConfig: defaultPluginConfig,
-				clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-					return clientgetter.NewBuilder().
-						WithDynamic(dynamicClient).Build(), nil
-				},
-				globalPackagingCluster:   defaultGlobalContext.Cluster,
-				globalPackagingNamespace: defaultGlobalContext.Namespace,
+				clientGetter: clientgetter.NewBuilder().
+					WithDynamic(dynamicClient).
+					Build(),
+				globalPackagingCluster: defaultGlobalContext.Cluster,
 			}
 
-			_, err := s.DeletePackageRepository(context.Background(), tc.request)
+			_, err := s.DeletePackageRepository(context.Background(), connect.NewRequest(tc.request))
 
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
 				t.Fatalf("got: %d, want: %d, err: %+v", got, want, err)
 			}
 		})
@@ -8132,7 +8284,7 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				},
 				Name:            "globalrepo",
 				NamespaceScoped: false,
-				Type:            Type_ImgPkgBundle,
+				Type:            typeImgPkgBundle,
 				Url:             "projects.registry.example.com/repo-1/main@sha256:abcd",
 				Interval:        "24h",
 			},
@@ -8144,7 +8296,7 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace:   defaultGlobalContext.Namespace,
 				Name:        "my-secret",
-				Annotations: map[string]string{Annotation_ManagedBy_Key: Annotation_ManagedBy_Value},
+				Annotations: map[string]string{annotationManagedByKey: annotationManagedByValue},
 				OwnerReferences: []metav1.OwnerReference{
 					{
 						APIVersion: defaultTypeMeta.APIVersion,
@@ -8165,7 +8317,7 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 		requestCustomizer    func(request *corev1.GetPackageRepositoryDetailRequest) *corev1.GetPackageRepositoryDetailRequest
 		repositoryCustomizer func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository
 		responseCustomizer   func(response *corev1.GetPackageRepositoryDetailResponse) *corev1.GetPackageRepositoryDetailResponse
-		expectedStatusCode   codes.Code
+		expectedErrorCode    connect.Code
 	}{
 		{
 			name: "not found",
@@ -8173,7 +8325,7 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				request.PackageRepoRef.Identifier = "foo"
 				return request
 			},
-			expectedStatusCode: codes.NotFound,
+			expectedErrorCode: connect.CodeNotFound,
 		},
 		{
 			name: "check ref",
@@ -8191,15 +8343,12 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				response.Detail.Name = "foo"
 				return response
 			},
-			expectedStatusCode: codes.OK,
 		},
 		{
-			name:               "check name",
-			expectedStatusCode: codes.OK,
+			name: "check name",
 		},
 		{
-			name:               "check global scope",
-			expectedStatusCode: codes.OK,
+			name: "check global scope",
 		},
 		{
 			name: "check namespace scoped",
@@ -8216,7 +8365,6 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				response.Detail.NamespaceScoped = true
 				return response
 			},
-			expectedStatusCode: codes.OK,
 		},
 		{
 			name: "check url",
@@ -8228,7 +8376,17 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				response.Detail.Url = "foo"
 				return response
 			},
-			expectedStatusCode: codes.OK,
+		},
+		{
+			name: "check description",
+			repositoryCustomizer: func(repository *packagingv1alpha1.PackageRepository) *packagingv1alpha1.PackageRepository {
+				repository.Annotations = map[string]string{k8sutils.AnnotationDescriptionKey: "repository description"}
+				return repository
+			},
+			responseCustomizer: func(response *corev1.GetPackageRepositoryDetailResponse) *corev1.GetPackageRepositoryDetailResponse {
+				response.Detail.Description = "repository description"
+				return response
+			},
 		},
 		{
 			name: "check interval (none)",
@@ -8240,7 +8398,6 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				response.Detail.Interval = ""
 				return response
 			},
-			expectedStatusCode: codes.OK,
 		},
 		{
 			name: "check interval (set)",
@@ -8252,7 +8409,6 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				response.Detail.Interval = "12h"
 				return response
 			},
-			expectedStatusCode: codes.OK,
 		},
 		{
 			name: "check imgpkg type",
@@ -8273,7 +8429,7 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				return repository
 			},
 			responseCustomizer: func(response *corev1.GetPackageRepositoryDetailResponse) *corev1.GetPackageRepositoryDetailResponse {
-				response.Detail.Type = Type_ImgPkgBundle
+				response.Detail.Type = typeImgPkgBundle
 				response.Detail.Url = "projects.registry.example.com/repo-1/main@sha256:abcd"
 				response.Detail.CustomDetail, _ = anypb.New(&kappcorev1.KappControllerPackageRepositoryCustomDetail{
 					Fetch: &kappcorev1.PackageRepositoryFetch{
@@ -8291,7 +8447,6 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				})
 				return response
 			},
-			expectedStatusCode: codes.OK,
 		},
 		{
 			name: "check image type",
@@ -8313,7 +8468,7 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				return repository
 			},
 			responseCustomizer: func(response *corev1.GetPackageRepositoryDetailResponse) *corev1.GetPackageRepositoryDetailResponse {
-				response.Detail.Type = Type_Image
+				response.Detail.Type = typeImage
 				response.Detail.Url = "projects.registry.example.com/repo-1/main@sha256:abcd"
 				response.Detail.CustomDetail, _ = anypb.New(&kappcorev1.KappControllerPackageRepositoryCustomDetail{
 					Fetch: &kappcorev1.PackageRepositoryFetch{
@@ -8332,7 +8487,6 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				})
 				return response
 			},
-			expectedStatusCode: codes.OK,
 		},
 		{
 			name: "check git type",
@@ -8356,7 +8510,7 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				return repository
 			},
 			responseCustomizer: func(response *corev1.GetPackageRepositoryDetailResponse) *corev1.GetPackageRepositoryDetailResponse {
-				response.Detail.Type = Type_GIT
+				response.Detail.Type = typeGIT
 				response.Detail.Url = "https://github.com/projects.registry.vmware.com/tce/main"
 				response.Detail.CustomDetail, _ = anypb.New(&kappcorev1.KappControllerPackageRepositoryCustomDetail{
 					Fetch: &kappcorev1.PackageRepositoryFetch{
@@ -8377,7 +8531,6 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				})
 				return response
 			},
-			expectedStatusCode: codes.OK,
 		},
 		{
 			name: "check http type",
@@ -8392,7 +8545,7 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				return repository
 			},
 			responseCustomizer: func(response *corev1.GetPackageRepositoryDetailResponse) *corev1.GetPackageRepositoryDetailResponse {
-				response.Detail.Type = Type_HTTP
+				response.Detail.Type = typeHTTP
 				response.Detail.Url = "https://projects.registry.vmware.com/tce/main"
 				response.Detail.CustomDetail, _ = anypb.New(&kappcorev1.KappControllerPackageRepositoryCustomDetail{
 					Fetch: &kappcorev1.PackageRepositoryFetch{
@@ -8404,7 +8557,6 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				})
 				return response
 			},
-			expectedStatusCode: codes.OK,
 		},
 		{
 			name: "check inline type",
@@ -8428,7 +8580,7 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				return repository
 			},
 			responseCustomizer: func(response *corev1.GetPackageRepositoryDetailResponse) *corev1.GetPackageRepositoryDetailResponse {
-				response.Detail.Type = Type_Inline
+				response.Detail.Type = typeInline
 				response.Detail.Url = ""
 				response.Detail.CustomDetail, _ = anypb.New(&kappcorev1.KappControllerPackageRepositoryCustomDetail{
 					Fetch: &kappcorev1.PackageRepositoryFetch{
@@ -8450,7 +8602,6 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				})
 				return response
 			},
-			expectedStatusCode: codes.OK,
 		},
 		{
 			name: "check auth - missing secret",
@@ -8460,7 +8611,7 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				}
 				return repository
 			},
-			expectedStatusCode: codes.NotFound,
+			expectedErrorCode: connect.CodeNotFound,
 		},
 		{
 			name: "check auth - user managed secret",
@@ -8487,7 +8638,6 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				}
 				return response
 			},
-			expectedStatusCode: codes.OK,
 		},
 		{
 			name: "check auth - plugin managed secret - basic auth",
@@ -8510,14 +8660,13 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 					Type: corev1.PackageRepositoryAuth_PACKAGE_REPOSITORY_AUTH_TYPE_BASIC_AUTH,
 					PackageRepoAuthOneOf: &corev1.PackageRepositoryAuth_UsernamePassword{
 						UsernamePassword: &corev1.UsernamePassword{
-							Username: Redacted,
-							Password: Redacted,
+							Username: redacted,
+							Password: redacted,
 						},
 					},
 				}
 				return response
 			},
-			expectedStatusCode: codes.OK,
 		},
 		{
 			name: "check auth - plugin managed secret - ssh auth",
@@ -8539,21 +8688,20 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 					Type: corev1.PackageRepositoryAuth_PACKAGE_REPOSITORY_AUTH_TYPE_SSH,
 					PackageRepoAuthOneOf: &corev1.PackageRepositoryAuth_SshCreds{
 						SshCreds: &corev1.SshCredentials{
-							PrivateKey: Redacted,
-							KnownHosts: Redacted,
+							PrivateKey: redacted,
+							KnownHosts: redacted,
 						},
 					},
 				}
 				return response
 			},
-			expectedStatusCode: codes.OK,
 		},
 		{
 			name: "check auth - plugin managed secret - bearer auth",
 			existingTypedObjects: []k8sruntime.Object{
 				func() *k8scorev1.Secret {
 					s := defaultSecret()
-					s.Data[BearerAuthToken] = []byte("foo")
+					s.Data[bearerAuthToken] = []byte("foo")
 					return s
 				}(),
 			},
@@ -8567,12 +8715,11 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				response.Detail.Auth = &corev1.PackageRepositoryAuth{
 					Type: corev1.PackageRepositoryAuth_PACKAGE_REPOSITORY_AUTH_TYPE_BEARER,
 					PackageRepoAuthOneOf: &corev1.PackageRepositoryAuth_Header{
-						Header: Redacted,
+						Header: redacted,
 					},
 				}
 				return response
 			},
-			expectedStatusCode: codes.OK,
 		},
 		{
 			name: "check auth - plugin managed secret - docker auth",
@@ -8594,16 +8741,15 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 					Type: corev1.PackageRepositoryAuth_PACKAGE_REPOSITORY_AUTH_TYPE_DOCKER_CONFIG_JSON,
 					PackageRepoAuthOneOf: &corev1.PackageRepositoryAuth_DockerCreds{
 						DockerCreds: &corev1.DockerCredentials{
-							Server:   Redacted,
-							Username: Redacted,
-							Password: Redacted,
-							Email:    Redacted,
+							Server:   redacted,
+							Username: redacted,
+							Password: redacted,
+							Email:    redacted,
 						},
 					},
 				}
 				return response
 			},
-			expectedStatusCode: codes.OK,
 		},
 	}
 
@@ -8631,11 +8777,11 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 
 			s := Server{
 				pluginConfig: defaultPluginConfig,
-				clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-					return clientgetter.NewBuilder().WithTyped(typedClient).WithDynamic(dynamicClient).Build(), nil
-				},
-				globalPackagingCluster:   defaultGlobalContext.Cluster,
-				globalPackagingNamespace: defaultGlobalContext.Namespace,
+				clientGetter: clientgetter.NewBuilder().
+					WithTyped(typedClient).
+					WithDynamic(dynamicClient).
+					Build(),
+				globalPackagingCluster: defaultGlobalContext.Cluster,
 			}
 
 			// invocation
@@ -8644,16 +8790,16 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				request = tc.requestCustomizer(request)
 			}
 
-			response, err := s.GetPackageRepositoryDetail(context.Background(), request)
+			response, err := s.GetPackageRepositoryDetail(context.Background(), connect.NewRequest(request))
 
 			// checks
-			if got, want := status.Code(err), tc.expectedStatusCode; got != want {
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
 				t.Fatalf("got error: %d, want: %d, err: %+v", got, want, err)
-			} else if got != codes.OK {
+			} else if got != 0 {
 				return
 			}
 
-			if got, want := request.PackageRepoRef, response.Detail.PackageRepoRef; !cmp.Equal(want, got, ignoreUnexported) {
+			if got, want := request.PackageRepoRef, response.Msg.Detail.PackageRepoRef; !cmp.Equal(want, got, ignoreUnexported) {
 				t.Errorf("ref mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
 			}
 
@@ -8662,7 +8808,7 @@ func TestGetPackageRepositoryDetail(t *testing.T) {
 				expectedResponse = tc.responseCustomizer(expectedResponse)
 			}
 
-			if got, want := response, expectedResponse; !cmp.Equal(want, got, ignoreUnexported) {
+			if got, want := response.Msg, expectedResponse; !cmp.Equal(want, got, ignoreUnexported) {
 				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
 			}
 		})
@@ -8699,7 +8845,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 				},
 				Name:            "nsrepo",
 				NamespaceScoped: true,
-				Type:            Type_ImgPkgBundle,
+				Type:            typeImgPkgBundle,
 				Url:             "projects.registry.example.com/repo-1/main@sha256:abcd",
 				RequiresAuth:    false,
 			},
@@ -8709,7 +8855,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 			existingObjects: []k8sruntime.Object{
 				&packagingv1alpha1.PackageRepository{
 					TypeMeta:   defaultTypeMeta,
-					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: globalPackagingNamespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace},
 					Spec: packagingv1alpha1.PackageRepositorySpec{
 						Fetch: &packagingv1alpha1.PackageRepositoryFetch{
 							ImgpkgBundle: &kappctrlv1alpha1.AppFetchImgpkgBundle{
@@ -8728,7 +8874,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 				},
 				Name:            "globalrepo",
 				NamespaceScoped: false,
-				Type:            Type_ImgPkgBundle,
+				Type:            typeImgPkgBundle,
 				Url:             "projects.registry.example.com/repo-1/main@sha256:abcd",
 				RequiresAuth:    false,
 			},
@@ -8738,7 +8884,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 			existingObjects: []k8sruntime.Object{
 				&packagingv1alpha1.PackageRepository{
 					TypeMeta:   defaultTypeMeta,
-					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: globalPackagingNamespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace},
 					Spec: packagingv1alpha1.PackageRepositorySpec{
 						Fetch: &packagingv1alpha1.PackageRepositoryFetch{
 							ImgpkgBundle: &kappctrlv1alpha1.AppFetchImgpkgBundle{
@@ -8756,7 +8902,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 					Identifier: "globalrepo",
 				},
 				Name:         "globalrepo",
-				Type:         Type_ImgPkgBundle,
+				Type:         typeImgPkgBundle,
 				Url:          "projects.registry.example.com/repo-1/main@sha256:abcd",
 				RequiresAuth: false,
 			},
@@ -8766,7 +8912,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 			existingObjects: []k8sruntime.Object{
 				&packagingv1alpha1.PackageRepository{
 					TypeMeta:   defaultTypeMeta,
-					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: globalPackagingNamespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace},
 					Spec: packagingv1alpha1.PackageRepositorySpec{
 						Fetch: &packagingv1alpha1.PackageRepositoryFetch{
 							Image: &kappctrlv1alpha1.AppFetchImage{
@@ -8784,7 +8930,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 					Identifier: "globalrepo",
 				},
 				Name:         "globalrepo",
-				Type:         Type_Image,
+				Type:         typeImage,
 				Url:          "projects.registry.example.com/repo-1/main@sha256:abcd",
 				RequiresAuth: false,
 			},
@@ -8794,7 +8940,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 			existingObjects: []k8sruntime.Object{
 				&packagingv1alpha1.PackageRepository{
 					TypeMeta:   defaultTypeMeta,
-					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: globalPackagingNamespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace},
 					Spec: packagingv1alpha1.PackageRepositorySpec{
 						Fetch: &packagingv1alpha1.PackageRepositoryFetch{
 							Git: &kappctrlv1alpha1.AppFetchGit{
@@ -8812,7 +8958,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 					Identifier: "globalrepo",
 				},
 				Name:         "globalrepo",
-				Type:         Type_GIT,
+				Type:         typeGIT,
 				Url:          "https://github.com/projects.registry.vmware.com/tce/main",
 				RequiresAuth: false,
 			},
@@ -8822,7 +8968,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 			existingObjects: []k8sruntime.Object{
 				&packagingv1alpha1.PackageRepository{
 					TypeMeta:   defaultTypeMeta,
-					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: globalPackagingNamespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace},
 					Spec: packagingv1alpha1.PackageRepositorySpec{
 						Fetch: &packagingv1alpha1.PackageRepositoryFetch{
 							HTTP: &kappctrlv1alpha1.AppFetchHTTP{
@@ -8840,7 +8986,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 					Identifier: "globalrepo",
 				},
 				Name:         "globalrepo",
-				Type:         Type_HTTP,
+				Type:         typeHTTP,
 				Url:          "https://projects.registry.vmware.com/tce/main",
 				RequiresAuth: false,
 			},
@@ -8850,7 +8996,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 			existingObjects: []k8sruntime.Object{
 				&packagingv1alpha1.PackageRepository{
 					TypeMeta:   defaultTypeMeta,
-					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: globalPackagingNamespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace},
 					Spec: packagingv1alpha1.PackageRepositorySpec{
 						Fetch: &packagingv1alpha1.PackageRepositoryFetch{
 							Inline: &kappctrlv1alpha1.AppFetchInline{},
@@ -8866,7 +9012,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 					Identifier: "globalrepo",
 				},
 				Name:         "globalrepo",
-				Type:         Type_Inline,
+				Type:         typeInline,
 				RequiresAuth: false,
 			},
 		},
@@ -8875,7 +9021,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 			existingObjects: []k8sruntime.Object{
 				&packagingv1alpha1.PackageRepository{
 					TypeMeta:   defaultTypeMeta,
-					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: globalPackagingNamespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace},
 					Spec: packagingv1alpha1.PackageRepositorySpec{
 						Fetch: &packagingv1alpha1.PackageRepositoryFetch{
 							ImgpkgBundle: &kappctrlv1alpha1.AppFetchImgpkgBundle{
@@ -8901,7 +9047,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 					Identifier: "globalrepo",
 				},
 				Name:         "globalrepo",
-				Type:         Type_ImgPkgBundle,
+				Type:         typeImgPkgBundle,
 				Url:          "projects.registry.example.com/repo-1/main@sha256:abcd",
 				RequiresAuth: false,
 			},
@@ -8911,7 +9057,7 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 			existingObjects: []k8sruntime.Object{
 				&packagingv1alpha1.PackageRepository{
 					TypeMeta:   defaultTypeMeta,
-					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: globalPackagingNamespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace},
 					Spec: packagingv1alpha1.PackageRepositorySpec{
 						Fetch: &packagingv1alpha1.PackageRepositoryFetch{
 							ImgpkgBundle: &kappctrlv1alpha1.AppFetchImgpkgBundle{
@@ -8932,9 +9078,38 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 					Identifier: "globalrepo",
 				},
 				Name:         "globalrepo",
-				Type:         Type_ImgPkgBundle,
+				Type:         typeImgPkgBundle,
 				Url:          "projects.registry.example.com/repo-1/main@sha256:abcd",
 				RequiresAuth: true,
+			},
+		},
+		{
+			name: "test with description",
+			existingObjects: []k8sruntime.Object{
+				&packagingv1alpha1.PackageRepository{
+					TypeMeta:   defaultTypeMeta,
+					ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace, Annotations: map[string]string{k8sutils.AnnotationDescriptionKey: "repository summary description"}},
+					Spec: packagingv1alpha1.PackageRepositorySpec{
+						Fetch: &packagingv1alpha1.PackageRepositoryFetch{
+							ImgpkgBundle: &kappctrlv1alpha1.AppFetchImgpkgBundle{
+								Image: "projects.registry.example.com/repo-1/main@sha256:abcd",
+							},
+						},
+					},
+					Status: packagingv1alpha1.PackageRepositoryStatus{},
+				},
+			},
+			expectedResponse: &corev1.PackageRepositorySummary{
+				PackageRepoRef: &corev1.PackageRepositoryReference{
+					Context:    defaultGlobalContext,
+					Plugin:     &pluginDetail,
+					Identifier: "globalrepo",
+				},
+				Name:         "globalrepo",
+				Description:  "repository summary description",
+				Type:         typeImgPkgBundle,
+				Url:          "projects.registry.example.com/repo-1/main@sha256:abcd",
+				RequiresAuth: false,
 			},
 		},
 	}
@@ -8949,33 +9124,186 @@ func TestGetPackageRepositorySummaries(t *testing.T) {
 
 			s := Server{
 				pluginConfig: defaultPluginConfig,
-				clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-					return clientgetter.NewBuilder().
-						WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
-							k8sruntime.NewScheme(),
-							map[schema.GroupVersionResource]string{
-								{Group: packagingv1alpha1.SchemeGroupVersion.Group, Version: packagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgRepositoriesResource}: pkgRepositoryResource + "List",
-							},
-							unstructuredObjects...,
-						)).Build(), nil
-				},
-				globalPackagingCluster:   defaultGlobalContext.Cluster,
-				globalPackagingNamespace: defaultGlobalContext.Namespace,
+				clientGetter: clientgetter.NewBuilder().
+					WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
+						k8sruntime.NewScheme(),
+						map[schema.GroupVersionResource]string{
+							{Group: packagingv1alpha1.SchemeGroupVersion.Group, Version: packagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgRepositoriesResource}: pkgRepositoryResource + "List",
+						},
+						unstructuredObjects...,
+					)).Build(),
+				globalPackagingCluster: defaultGlobalContext.Cluster,
 			}
 
 			// query repositories
-			response, err := s.GetPackageRepositorySummaries(context.Background(), &corev1.GetPackageRepositorySummariesRequest{
+			response, err := s.GetPackageRepositorySummaries(context.Background(), connect.NewRequest(&corev1.GetPackageRepositorySummariesRequest{
 				Context: &corev1.Context{Namespace: ""},
-			})
+			}))
 			if err != nil {
 				t.Fatalf("received unexpected error: %+v", err)
 			}
 
 			// fail fast
-			if len(response.GetPackageRepositorySummaries()) != 1 {
-				t.Fatalf("mistmatch on number of summaries received, expected 1 but got %d", len(response.PackageRepositorySummaries))
+			if len(response.Msg.GetPackageRepositorySummaries()) != 1 {
+				t.Fatalf("mistmatch on number of summaries received, expected 1 but got %d", len(response.Msg.PackageRepositorySummaries))
 			}
-			if got, want := response.PackageRepositorySummaries[0], tc.expectedResponse; !cmp.Equal(got, want, ignoreUnexported) {
+			if got, want := response.Msg.PackageRepositorySummaries[0], tc.expectedResponse; !cmp.Equal(got, want, ignoreUnexported) {
+				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
+			}
+		})
+	}
+}
+
+type ClientReaction struct {
+	verb     string
+	resource string
+	reaction k8stesting.ReactionFunc
+}
+
+func TestGetPackageRepositorySummariesNamespaces(t *testing.T) {
+	testCases := []struct {
+		name               string
+		request            *corev1.GetPackageRepositorySummariesRequest
+		existingRepos      []k8sruntime.Object
+		existingNamespaces []*k8scorev1.Namespace
+		expectedErrorCode  connect.Code
+		expectedResponse   *corev1.GetPackageRepositorySummariesResponse
+		reactors           []*ClientReaction
+	}{
+		{
+			name: "returns actual accessible package summaries when namespace not specified and no cluster level access",
+			request: &corev1.GetPackageRepositorySummariesRequest{
+				Context: &corev1.Context{Cluster: "default"},
+			},
+			existingNamespaces: []*k8scorev1.Namespace{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "ns-accessible",
+					},
+					Status: k8scorev1.NamespaceStatus{
+						Phase: k8scorev1.NamespaceActive,
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "ns-inaccessible",
+					},
+					Status: k8scorev1.NamespaceStatus{
+						Phase: k8scorev1.NamespaceActive,
+					},
+				},
+			},
+			reactors: []*ClientReaction{
+				{
+					verb:     "list",
+					resource: "packagerepositories",
+					reaction: func(action k8stesting.Action) (handled bool, ret k8sruntime.Object, err error) {
+						switch action.GetNamespace() {
+						// Forbidden cluster-wide listing and a specific namespace
+						case "":
+							return true, nil, k8sErrors.NewForbidden(authorizationv1.Resource("PackageRepository"), "", errors.New("bang"))
+						case "ns-inaccessible":
+							return true, nil, k8sErrors.NewForbidden(authorizationv1.Resource("PackageRepository"), "", errors.New("bang"))
+						case "ns-accessible":
+							return true, &packagingv1alpha1.PackageRepositoryList{
+								Items: []packagingv1alpha1.PackageRepository{
+									{
+										TypeMeta:   defaultTypeMeta,
+										ObjectMeta: metav1.ObjectMeta{Name: "repo-accessible-1", Namespace: "ns-accessible"},
+										Spec: packagingv1alpha1.PackageRepositorySpec{
+											Fetch: &packagingv1alpha1.PackageRepositoryFetch{
+												ImgpkgBundle: &kappctrlv1alpha1.AppFetchImgpkgBundle{
+													Image: "projects.registry.example.com/repo-1/main@sha256:abcd",
+												},
+											},
+										},
+										Status: packagingv1alpha1.PackageRepositoryStatus{},
+									},
+								},
+							}, nil
+						default:
+							return true, &packagingv1alpha1.PackageRepositoryList{}, nil
+						}
+					},
+				},
+			},
+			expectedResponse: &corev1.GetPackageRepositorySummariesResponse{
+				PackageRepositorySummaries: []*corev1.PackageRepositorySummary{
+					{
+						PackageRepoRef: &corev1.PackageRepositoryReference{
+							Context:    &corev1.Context{Cluster: defaultContext.Cluster, Namespace: "ns-accessible"},
+							Plugin:     &pluginDetail,
+							Identifier: "repo-accessible-1",
+						},
+						Name:            "repo-accessible-1",
+						NamespaceScoped: true,
+						Type:            "imgpkgBundle",
+						Url:             "projects.registry.example.com/repo-1/main@sha256:abcd",
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var unstructuredObjects []k8sruntime.Object
+			if tc.existingRepos != nil {
+				for _, repo := range tc.existingRepos {
+					unstructuredContent, _ := k8sruntime.DefaultUnstructuredConverter.ToUnstructured(repo)
+					unstructuredObjects = append(unstructuredObjects, &unstructured.Unstructured{Object: unstructuredContent})
+				}
+			}
+
+			var typedObjects []k8sruntime.Object
+			if tc.existingNamespaces != nil {
+				for _, ns := range tc.existingNamespaces {
+					typedObjects = append(typedObjects, ns)
+				}
+			}
+
+			scheme := k8sruntime.NewScheme()
+			err := packagingv1alpha1.AddToScheme(scheme)
+			if err != nil {
+				log.Fatalf("%s", err)
+			}
+			err = authorizationv1.AddToScheme(scheme)
+			if err != nil {
+				log.Fatalf("%s", err)
+			}
+
+			dynClient := dynfake.NewSimpleDynamicClientWithCustomListKinds(
+				scheme,
+				map[schema.GroupVersionResource]string{
+					{Group: packagingv1alpha1.SchemeGroupVersion.Group, Version: packagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgRepositoriesResource}: pkgRepositoryResource + "List",
+				},
+				unstructuredObjects...,
+			)
+			for _, reaction := range tc.reactors {
+				dynClient.PrependReactor(reaction.verb, reaction.resource, reaction.reaction)
+			}
+
+			s := Server{
+				pluginConfig: defaultPluginConfig,
+				clientGetter: clientgetter.NewBuilder().
+					WithTyped(typfake.NewSimpleClientset(typedObjects...)).
+					WithDynamic(dynClient).
+					Build(),
+				globalPackagingCluster: defaultGlobalContext.Cluster,
+			}
+
+			response, err := s.GetPackageRepositorySummaries(context.Background(), connect.NewRequest(tc.request))
+
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
+				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
+			}
+
+			// We don't need to check anything else for non-OK codes.
+			if tc.expectedErrorCode != 0 {
+				return
+			}
+
+			if got, want := response.Msg, tc.expectedResponse; !cmp.Equal(want, got, ignoreUnexported) {
 				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
 			}
 		})
@@ -8986,7 +9314,7 @@ func TestGetPackageRepositorySummariesFiltering(t *testing.T) {
 	repositories := []k8sruntime.Object{
 		&packagingv1alpha1.PackageRepository{
 			TypeMeta:   defaultTypeMeta,
-			ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: globalPackagingNamespace},
+			ObjectMeta: metav1.ObjectMeta{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace},
 			Spec: packagingv1alpha1.PackageRepositorySpec{
 				Fetch: &packagingv1alpha1.PackageRepositoryFetch{
 					ImgpkgBundle: &kappctrlv1alpha1.AppFetchImgpkgBundle{
@@ -9021,8 +9349,10 @@ func TestGetPackageRepositorySummariesFiltering(t *testing.T) {
 			request: &corev1.GetPackageRepositorySummariesRequest{
 				Context: &corev1.Context{Namespace: "default"},
 			},
-			existingObjects:  repositories,
-			expectedResponse: []metav1.ObjectMeta{},
+			existingObjects: repositories,
+			expectedResponse: []metav1.ObjectMeta{
+				{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace},
+			},
 		},
 		{
 			name: "returns repositories from given namespace",
@@ -9031,17 +9361,18 @@ func TestGetPackageRepositorySummariesFiltering(t *testing.T) {
 			},
 			existingObjects: repositories,
 			expectedResponse: []metav1.ObjectMeta{
-				metav1.ObjectMeta{Name: "nsrepo", Namespace: "privatens"},
+				{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace},
+				{Name: "nsrepo", Namespace: "privatens"},
 			},
 		},
 		{
 			name: "returns repositories from global namespace",
 			request: &corev1.GetPackageRepositorySummariesRequest{
-				Context: &corev1.Context{Namespace: globalPackagingNamespace},
+				Context: &corev1.Context{Namespace: demoGlobalPackagingNamespace},
 			},
 			existingObjects: repositories,
 			expectedResponse: []metav1.ObjectMeta{
-				metav1.ObjectMeta{Name: "globalrepo", Namespace: globalPackagingNamespace},
+				{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace},
 			},
 		},
 		{
@@ -9051,8 +9382,8 @@ func TestGetPackageRepositorySummariesFiltering(t *testing.T) {
 			},
 			existingObjects: repositories,
 			expectedResponse: []metav1.ObjectMeta{
-				metav1.ObjectMeta{Name: "globalrepo", Namespace: globalPackagingNamespace},
-				metav1.ObjectMeta{Name: "nsrepo", Namespace: "privatens"},
+				{Name: "globalrepo", Namespace: demoGlobalPackagingNamespace},
+				{Name: "nsrepo", Namespace: "privatens"},
 			},
 		},
 	}
@@ -9067,40 +9398,37 @@ func TestGetPackageRepositorySummariesFiltering(t *testing.T) {
 
 			s := Server{
 				pluginConfig: defaultPluginConfig,
-				clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-					return clientgetter.NewBuilder().
-						WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
-							k8sruntime.NewScheme(),
-							map[schema.GroupVersionResource]string{
-								{Group: packagingv1alpha1.SchemeGroupVersion.Group, Version: packagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgRepositoriesResource}: pkgRepositoryResource + "List",
-							},
-							unstructuredObjects...,
-						)).Build(), nil
-				},
-				globalPackagingNamespace: globalPackagingNamespace,
+				clientGetter: clientgetter.NewBuilder().
+					WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
+						k8sruntime.NewScheme(),
+						map[schema.GroupVersionResource]string{
+							{Group: packagingv1alpha1.SchemeGroupVersion.Group, Version: packagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgRepositoriesResource}: pkgRepositoryResource + "List",
+						},
+						unstructuredObjects...,
+					)).Build(),
 			}
 
 			// should not happen
-			response, err := s.GetPackageRepositorySummaries(context.Background(), tc.request)
+			response, err := s.GetPackageRepositorySummaries(context.Background(), connect.NewRequest(tc.request))
 			if err != nil {
 				t.Fatalf("received unexpected error: %+v", err)
 			}
 
 			// fail fast
-			if len(response.PackageRepositorySummaries) != len(tc.expectedResponse) {
-				t.Fatalf("mistmatch on number of summaries received, expected %d but got %d", len(tc.expectedResponse), len(response.PackageRepositorySummaries))
+			if len(response.Msg.PackageRepositorySummaries) != len(tc.expectedResponse) {
+				t.Fatalf("mistmatch on number of summaries received, expected %d but got %d", len(tc.expectedResponse), len(response.Msg.PackageRepositorySummaries))
 			}
 
 			// sort response
-			sort.Slice(response.PackageRepositorySummaries, func(i, j int) bool {
-				refi := response.PackageRepositorySummaries[i].GetPackageRepoRef()
-				refj := response.PackageRepositorySummaries[j].GetPackageRepoRef()
+			sort.Slice(response.Msg.PackageRepositorySummaries, func(i, j int) bool {
+				refi := response.Msg.PackageRepositorySummaries[i].GetPackageRepoRef()
+				refj := response.Msg.PackageRepositorySummaries[j].GetPackageRepoRef()
 				return refi.GetIdentifier() < refj.GetIdentifier()
 			})
 
 			for i := 0; i < len(tc.expectedResponse); i++ {
 				expected := tc.expectedResponse[i]
-				receivedRef := response.PackageRepositorySummaries[i].GetPackageRepoRef()
+				receivedRef := response.Msg.PackageRepositorySummaries[i].GetPackageRepoRef()
 				if expected.Name != receivedRef.GetIdentifier() {
 					t.Fatalf("expected to received repository named %s but received name %s", expected.Name, receivedRef.GetIdentifier())
 				}
@@ -9210,7 +9538,7 @@ func TestGetPackageRepositoryStatus(t *testing.T) {
 			},
 		},
 		{
-			name: "reconcilation failure",
+			name: "reconciliation failure",
 			existingStatus: kappctrlv1alpha1.GenericStatus{
 				Conditions: []kappctrlv1alpha1.Condition{
 					{
@@ -9225,7 +9553,7 @@ func TestGetPackageRepositoryStatus(t *testing.T) {
 			},
 		},
 		{
-			name: "reconcilation failure, extra error message",
+			name: "reconciliation failure, extra error message",
 			existingStatus: kappctrlv1alpha1.GenericStatus{
 				Conditions: []kappctrlv1alpha1.Condition{
 					{
@@ -9282,33 +9610,30 @@ func TestGetPackageRepositoryStatus(t *testing.T) {
 
 			s := Server{
 				pluginConfig: defaultPluginConfig,
-				clientGetter: func(ctx context.Context, cluster string) (clientgetter.ClientInterfaces, error) {
-					return clientgetter.NewBuilder().
-						WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
-							k8sruntime.NewScheme(),
-							map[schema.GroupVersionResource]string{
-								{Group: packagingv1alpha1.SchemeGroupVersion.Group, Version: packagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgRepositoriesResource}: pkgRepositoryResource + "List",
-							},
-							unstructuredObjects...,
-						)).Build(), nil
-				},
-				globalPackagingCluster:   defaultGlobalContext.Cluster,
-				globalPackagingNamespace: defaultGlobalContext.Namespace,
+				clientGetter: clientgetter.NewBuilder().
+					WithDynamic(dynfake.NewSimpleDynamicClientWithCustomListKinds(
+						k8sruntime.NewScheme(),
+						map[schema.GroupVersionResource]string{
+							{Group: packagingv1alpha1.SchemeGroupVersion.Group, Version: packagingv1alpha1.SchemeGroupVersion.Version, Resource: pkgRepositoriesResource}: pkgRepositoryResource + "List",
+						},
+						unstructuredObjects...,
+					)).Build(),
+				globalPackagingCluster: defaultGlobalContext.Cluster,
 			}
 
 			// should not happen
-			response, err := s.GetPackageRepositorySummaries(context.Background(), &corev1.GetPackageRepositorySummariesRequest{
+			response, err := s.GetPackageRepositorySummaries(context.Background(), connect.NewRequest(&corev1.GetPackageRepositorySummariesRequest{
 				Context: &corev1.Context{Namespace: ""},
-			})
+			}))
 			if err != nil {
 				t.Fatalf("received unexpected error: %+v", err)
 			}
 
 			// fail fast
-			if len(response.GetPackageRepositorySummaries()) != 1 {
-				t.Fatalf("mistmatch on number of summaries received, expected 1 but got %d", len(response.PackageRepositorySummaries))
+			if len(response.Msg.GetPackageRepositorySummaries()) != 1 {
+				t.Fatalf("mistmatch on number of summaries received, expected 1 but got %d", len(response.Msg.PackageRepositorySummaries))
 			}
-			if got, want := response.PackageRepositorySummaries[0].Status, tc.expectedResponse; !cmp.Equal(got, want, ignoreUnexported) {
+			if got, want := response.Msg.PackageRepositorySummaries[0].Status, tc.expectedResponse; !cmp.Equal(got, want, ignoreUnexported) {
 				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
 			}
 		})
@@ -9604,6 +9929,177 @@ kappController:
 				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
 			}
 
+		})
+	}
+}
+
+func TestGetPackageRepositoryPermissions(t *testing.T) {
+
+	testCases := []struct {
+		name              string
+		request           *corev1.GetPackageRepositoryPermissionsRequest
+		expectedErrorCode connect.Code
+		expectedResponse  *corev1.GetPackageRepositoryPermissionsResponse
+		reactors          []*ClientReaction
+	}{
+		{
+			name: "returns permissions for global package repositories",
+			request: &corev1.GetPackageRepositoryPermissionsRequest{
+				Context: &corev1.Context{Cluster: defaultContext.Cluster},
+			},
+			reactors: []*ClientReaction{
+				{
+					verb:     "create",
+					resource: "selfsubjectaccessreviews",
+					reaction: func(action k8stesting.Action) (handled bool, ret k8sruntime.Object, err error) {
+						createAction := action.(k8stesting.CreateActionImpl)
+						accessReview := createAction.Object.(*authorizationv1.SelfSubjectAccessReview)
+						if accessReview.Spec.ResourceAttributes.Namespace != fallbackGlobalPackagingNamespace {
+							return true, &authorizationv1.SelfSubjectAccessReview{Status: authorizationv1.SubjectAccessReviewStatus{Allowed: false}}, nil
+						}
+						switch accessReview.Spec.ResourceAttributes.Verb {
+						case "list", "delete":
+							return true, &authorizationv1.SelfSubjectAccessReview{Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true}}, nil
+						default:
+							return true, &authorizationv1.SelfSubjectAccessReview{Status: authorizationv1.SubjectAccessReviewStatus{Allowed: false}}, nil
+						}
+					},
+				},
+			},
+			expectedResponse: &corev1.GetPackageRepositoryPermissionsResponse{
+				Permissions: []*corev1.PackageRepositoriesPermissions{
+					{
+						Plugin: GetPluginDetail(),
+						Global: map[string]bool{
+							"create": false,
+							"delete": true,
+							"get":    false,
+							"list":   true,
+							"update": false,
+							"watch":  false,
+						},
+						Namespace: nil,
+					},
+				},
+			},
+		},
+		{
+			name:    "returns local permissions when no cluster specified",
+			request: &corev1.GetPackageRepositoryPermissionsRequest{},
+			reactors: []*ClientReaction{
+				{
+					verb:     "create",
+					resource: "selfsubjectaccessreviews",
+					reaction: func(action k8stesting.Action) (handled bool, ret k8sruntime.Object, err error) {
+						return true, &authorizationv1.SelfSubjectAccessReview{Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true}}, nil
+					},
+				},
+			},
+			expectedResponse: &corev1.GetPackageRepositoryPermissionsResponse{
+				Permissions: []*corev1.PackageRepositoriesPermissions{
+					{
+						Plugin: GetPluginDetail(),
+						Global: map[string]bool{
+							"create": true,
+							"delete": true,
+							"get":    true,
+							"list":   true,
+							"update": true,
+							"watch":  true,
+						},
+						Namespace: nil,
+					},
+				},
+			},
+		},
+		{
+			name: "fails when namespace is specified but not the cluster",
+			request: &corev1.GetPackageRepositoryPermissionsRequest{
+				Context: &corev1.Context{Namespace: "my-ns"},
+			},
+			expectedErrorCode: connect.CodeInvalidArgument,
+		},
+		{
+			name: "returns permissions for namespaced package repositories",
+			request: &corev1.GetPackageRepositoryPermissionsRequest{
+				Context: &corev1.Context{Cluster: defaultContext.Cluster, Namespace: "my-ns"},
+			},
+			reactors: []*ClientReaction{
+				{
+					verb:     "create",
+					resource: "selfsubjectaccessreviews",
+					reaction: func(action k8stesting.Action) (handled bool, ret k8sruntime.Object, err error) {
+						createAction := action.(k8stesting.CreateActionImpl)
+						accessReview := createAction.Object.(*authorizationv1.SelfSubjectAccessReview)
+						if accessReview.Spec.ResourceAttributes.Namespace == fallbackGlobalPackagingNamespace {
+							return true, &authorizationv1.SelfSubjectAccessReview{Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true}}, nil
+						}
+						switch accessReview.Spec.ResourceAttributes.Verb {
+						case "list", "delete":
+							return true, &authorizationv1.SelfSubjectAccessReview{Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true}}, nil
+						default:
+							return true, &authorizationv1.SelfSubjectAccessReview{Status: authorizationv1.SubjectAccessReviewStatus{Allowed: false}}, nil
+						}
+					},
+				},
+			},
+			expectedResponse: &corev1.GetPackageRepositoryPermissionsResponse{
+				Permissions: []*corev1.PackageRepositoriesPermissions{
+					{
+						Plugin: GetPluginDetail(),
+						Global: map[string]bool{
+							"create": true,
+							"delete": true,
+							"get":    true,
+							"list":   true,
+							"update": true,
+							"watch":  true,
+						},
+						Namespace: map[string]bool{
+							"create": false,
+							"delete": true,
+							"get":    false,
+							"list":   true,
+							"update": false,
+							"watch":  false,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			typedClient := typfake.NewSimpleClientset()
+			for _, reaction := range tc.reactors {
+				typedClient.PrependReactor(reaction.verb, reaction.resource, reaction.reaction)
+			}
+
+			s := Server{
+				pluginConfig: &kappControllerPluginParsedConfig{
+					globalPackagingNamespace: fallbackGlobalPackagingNamespace,
+				},
+				clientGetter: clientgetter.NewBuilder().
+					WithTyped(typedClient).
+					Build(),
+				globalPackagingCluster: defaultGlobalContext.Cluster,
+			}
+
+			response, err := s.GetPackageRepositoryPermissions(context.Background(), connect.NewRequest(tc.request))
+
+			if got, want := connect.CodeOf(err), tc.expectedErrorCode; err != nil && got != want {
+				t.Fatalf("got: %+v, want: %+v, err: %+v", got, want, err)
+			}
+
+			// We don't need to check anything else for non-OK codes.
+			if tc.expectedErrorCode != 0 {
+				return
+			}
+
+			if got, want := response.Msg, tc.expectedResponse; !cmp.Equal(want, got, ignoreUnexported) {
+				t.Errorf("mismatch (-want +got):\n%s", cmp.Diff(want, got, ignoreUnexported))
+			}
 		})
 	}
 }

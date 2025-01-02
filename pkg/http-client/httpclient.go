@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,32 +18,36 @@ const (
 	defaultTimeoutSeconds = 180
 )
 
-type Client interface {
-	Do(req *http.Request) (*http.Response, error)
-}
-
-// ClientWithDefaults implements Client interface
-// and includes an override of the Do method which injects the following supported defaults:
-//  - headers: e.g. User-Agent and Authorization (when present)
-type ClientWithDefaults struct {
-	Client         Client
+// DefaultHeaderTransport
+//
+// Used for an http.Client that will have default headers set.
+type DefaultHeaderTransport struct {
 	DefaultHeaders http.Header
+	Transport      http.RoundTripper
 }
 
-// ClientWithDefaults Do HTTP request
-func (c *ClientWithDefaults) Do(req *http.Request) (*http.Response, error) {
-	for k, v := range c.DefaultHeaders {
-		// Only add the default header if it's not already set in the request.
-		if _, ok := req.Header[k]; !ok {
-			req.Header[k] = v
+func (dht *DefaultHeaderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	for k, vv := range dht.DefaultHeaders {
+		for _, v := range vv {
+			req.Header.Add(k, v)
 		}
 	}
-	return c.Client.Do(req)
+	return dht.Transport.RoundTrip(req)
 }
 
-// creates a new instance of http Client, with following default configuration:
-//		- timeout
-//		- proxy from environment
+func NewDefaultHeaderClient(c *http.Client, header http.Header) *http.Client {
+	return &http.Client{
+		Transport: &DefaultHeaderTransport{
+			DefaultHeaders: header,
+			Transport:      c.Transport,
+		},
+		Timeout: c.Timeout,
+	}
+}
+
+// New creates a new instance of http Client, with following default configuration:
+//   - timeout
+//   - proxy from environment
 func New() *http.Client {
 	return &http.Client{
 		Timeout: time.Second * defaultTimeoutSeconds,
@@ -54,13 +57,13 @@ func New() *http.Client {
 	}
 }
 
-// creates a new instance of Client, given a path to additional certificates
+// NewWithCertFile creates a new instance of Client, given a path to additional certificates
 // certFile may be empty string, which means no additional certs will be used
 func NewWithCertFile(certFile string, skipTLS bool) (*http.Client, error) {
 	// If additionalCA exists, load it
 	if _, err := os.Stat(certFile); !os.IsNotExist(err) {
 		// #nosec G304
-		certs, err := ioutil.ReadFile(certFile)
+		certs, err := os.ReadFile(certFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to append %s to RootCAs: %v", certFile, err)
 		}
@@ -80,7 +83,7 @@ func NewWithCertFile(certFile string, skipTLS bool) (*http.Client, error) {
 	return client, nil
 }
 
-// creates a new instance of Client, given bytes for additional certificates
+// NewWithCertBytes creates a new instance of Client, given bytes for additional certificates
 func NewWithCertBytes(certs []byte, skipTLS bool) (*http.Client, error) {
 	// create cert pool
 	caCertPool, err := GetCertPool(certs)
@@ -102,7 +105,7 @@ func NewWithCertBytes(certs []byte, skipTLS bool) (*http.Client, error) {
 	return client, nil
 }
 
-// get or create a cert pool, with the given (optional) certs
+// GetCertPool get or create a cert pool, with the given (optional) certs
 func GetCertPool(certs []byte) (*x509.CertPool, error) {
 	// Require the SystemCertPool unless the env var is explicitly set.
 	caCertPool, err := x509.SystemCertPool()
@@ -120,7 +123,7 @@ func GetCertPool(certs []byte) (*x509.CertPool, error) {
 	return caCertPool, nil
 }
 
-// configure the given proxy on the given client
+// SetClientProxy configure the given proxy on the given client
 func SetClientProxy(client *http.Client, proxy func(*http.Request) (*url.URL, error)) error {
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok {
@@ -130,7 +133,7 @@ func SetClientProxy(client *http.Client, proxy func(*http.Request) (*url.URL, er
 	return nil
 }
 
-// configure the given tls on the given client
+// SetClientTLS configure the given tls on the given client
 func SetClientTLS(client *http.Client, config *tls.Config) error {
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok {
@@ -164,10 +167,10 @@ func NewClientTLS(certBytes, keyBytes, caBytes []byte) (*tls.Config, error) {
 	return &config, nil
 }
 
-// performs an HTTP GET request using provided client, URL and request headers.
+// Get performs an HTTP GET request using provided client, URL and request headers.
 // returns response body, as bytes on successful status, or error body,
 // if applicable on error status
-func Get(url string, cli Client, headers map[string]string) ([]byte, error) {
+func Get(url string, cli *http.Client, headers map[string]string) ([]byte, error) {
 	reader, _, err := GetStream(url, cli, headers)
 	if reader != nil {
 		defer reader.Close()
@@ -175,15 +178,15 @@ func Get(url string, cli Client, headers map[string]string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ioutil.ReadAll(reader)
+	return io.ReadAll(reader)
 }
 
-// performs an HTTP GET request using provided client, URL and request headers.
+// GetStream performs an HTTP GET request using provided client, URL and request headers.
 // returns response body, as bytes on successful status, or error body,
 // if applicable on error status
 // returns response as a stream, as well as response content type
 // NOTE: it is the caller's responsibility to close the reader stream when no longer needed
-func GetStream(url string, cli Client, reqHeaders map[string]string) (io.ReadCloser, string, error) {
+func GetStream(url string, cli *http.Client, reqHeaders map[string]string) (io.ReadCloser, string, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, "", err
@@ -202,11 +205,11 @@ func GetStream(url string, cli Client, reqHeaders map[string]string) (io.ReadClo
 
 	if res.StatusCode != http.StatusOK {
 		errorMsg := fmt.Sprintf("GET request to [%s] failed due to status [%d]", url, res.StatusCode)
-		errPayload, err := ioutil.ReadAll(res.Body)
+		errPayload, err := io.ReadAll(res.Body)
 		if err == nil && len(errPayload) > 0 {
 			errorMsg += ": " + string(errPayload)
 		}
-		return nil, respContentType, fmt.Errorf(errorMsg)
+		return nil, respContentType, fmt.Errorf("%s", errorMsg)
 	}
 
 	return res.Body, respContentType, nil

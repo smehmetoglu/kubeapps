@@ -1,4 +1,4 @@
-// Copyright 2022 the Kubeapps contributors.
+// Copyright 2022-2024 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 package main
@@ -10,14 +10,19 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net/http"
+	"os"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 
-	helmv2 "github.com/fluxcd/helm-controller/api/v2beta1"
-	sourcev1 "github.com/fluxcd/source-controller/api/v1beta2"
+	k8stesting "k8s.io/client-go/testing"
+
+	helmv2beta2 "github.com/fluxcd/helm-controller/api/v2beta2"
+	sourcev1beta2 "github.com/fluxcd/source-controller/api/v1beta2"
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/packages/v1alpha1"
 	plugins "github.com/vmware-tanzu/kubeapps/cmd/kubeapps-apis/gen/core/plugins/v1alpha1"
 	apiv1 "k8s.io/api/core/v1"
@@ -28,15 +33,30 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
+	log "k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 const KubeappsCluster = "default"
 
+type ClientReaction struct {
+	verb     string
+	resource string
+	reaction k8stesting.ReactionFunc
+}
+
 type withWatchWrapper struct {
 	delegate client.WithWatch
 	watcher  *watch.RaceFreeFakeWatcher
+}
+
+func (w *withWatchWrapper) GroupVersionKindFor(obj runtime.Object) (schema.GroupVersionKind, error) {
+	return w.delegate.GroupVersionKindFor(obj)
+}
+
+func (w *withWatchWrapper) IsObjectNamespaced(obj runtime.Object) (bool, error) {
+	return w.delegate.IsObjectNamespaced(obj)
 }
 
 var _ client.WithWatch = &withWatchWrapper{}
@@ -45,7 +65,7 @@ func (w *withWatchWrapper) Create(ctx context.Context, obj client.Object, opts .
 	return w.delegate.Create(ctx, obj, opts...)
 }
 
-func (w *withWatchWrapper) Get(ctx context.Context, key client.ObjectKey, obj client.Object) error {
+func (w *withWatchWrapper) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 	return w.delegate.Get(ctx, key, obj)
 }
 
@@ -58,6 +78,10 @@ func (w *withWatchWrapper) List(ctx context.Context, list client.ObjectList, opt
 		accessor.SetResourceVersion("1")
 		return nil
 	}
+}
+
+func (w *withWatchWrapper) SubResource(subResource string) client.SubResourceClient {
+	return w.delegate.SubResource(subResource)
 }
 
 func (w *withWatchWrapper) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
@@ -93,9 +117,7 @@ func (w *withWatchWrapper) Watch(ctx context.Context, list client.ObjectList, op
 	if err != nil {
 		return wi, err
 	} else if watcher, ok := wi.(*watch.RaceFreeFakeWatcher); !ok {
-		return wi, fmt.Errorf(
-			"Unexpected type for watcher, expected *watch.RaceFreeFakeWatcher, got: %s",
-			reflect.TypeOf(wi))
+		return wi, fmt.Errorf("Unexpected type for watcher, expected *watch.RaceFreeFakeWatcher, got: %T", wi)
 	} else {
 		w.watcher = watcher
 		return wi, err
@@ -109,11 +131,6 @@ func lessAvailablePackageFunc(p1, p2 *corev1.AvailablePackageSummary) bool {
 
 // these are helpers to compare slices ignoring order
 func lessInstalledPackageSummaryFunc(p1, p2 *corev1.InstalledPackageSummary) bool {
-	return p1.Name < p2.Name
-}
-
-// these are helpers to compare slices ignoring order
-func lessPackageRepositorySummaryFunc(p1, p2 *corev1.PackageRepositorySummary) bool {
 	return p1.Name < p2.Name
 }
 
@@ -158,11 +175,11 @@ func compareJSONStrings(t *testing.T, expectedJSONString, actualJSONString strin
 // generate-cert.sh script in testdata directory is used to generate these files
 func getCertsForTesting(t *testing.T) (ca, pub, priv []byte) {
 	var err error
-	if ca, err = ioutil.ReadFile(testCert("ca.pem")); err != nil {
+	if ca, err = os.ReadFile(testCert("ca.pem")); err != nil {
 		t.Fatalf("%+v", err)
-	} else if pub, err = ioutil.ReadFile(testCert("server.pem")); err != nil {
+	} else if pub, err = os.ReadFile(testCert("server.pem")); err != nil {
 		t.Fatalf("%+v", err)
-	} else if priv, err = ioutil.ReadFile(testCert("server-key.pem")); err != nil {
+	} else if priv, err = os.ReadFile(testCert("server-key.pem")); err != nil {
 		t.Fatalf("%+v", err)
 	}
 	return ca, pub, priv
@@ -175,7 +192,10 @@ func basicAuth(handler http.HandlerFunc, username, password, realm string) http.
 		if !ok || subtle.ConstantTimeCompare([]byte(user), []byte(username)) != 1 || subtle.ConstantTimeCompare([]byte(pass), []byte(password)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Basic realm="`+realm+`"`)
 			w.WriteHeader(401)
-			w.Write([]byte("Unauthorised.\n"))
+			_, err := w.Write([]byte("Unauthorised.\n"))
+			if err != nil {
+				log.Fatalf("%+v", err)
+			}
 			return
 		}
 		handler(w, r)
@@ -267,12 +287,26 @@ func newDockerConfigJsonSecret(name types.NamespacedName, server, user, password
 	return s
 }
 
+func setSecretManagedByKubeapps(secret *apiv1.Secret) *apiv1.Secret {
+	m := secret.GetAnnotations()
+	if m == nil {
+		m = make(map[string]string)
+		secret.SetAnnotations(m)
+	}
+	m[annotationManagedByKey] = annotationManagedByValue
+	return secret
+}
+
+// TODO (gfichenholt) technically speaking this isn't quite right for a test case
+// that actually involves non-fake k8s environment.
+// In order for this to be 100% right, we need a repo object with a UID set up. But
+// its good enough for a fake k8s environment, which is where this is used
 func setSecretOwnerRef(repoName string, secret *apiv1.Secret) *apiv1.Secret {
 	tRue := true
 	secret.OwnerReferences = []metav1.OwnerReference{
 		{
-			APIVersion:         sourcev1.GroupVersion.String(),
-			Kind:               sourcev1.HelmRepositoryKind,
+			APIVersion:         sourcev1beta2.GroupVersion.String(),
+			Kind:               sourcev1beta2.HelmRepositoryKind,
 			Name:               repoName,
 			Controller:         &tRue,
 			BlockOwnerDeletion: &tRue,
@@ -319,39 +353,45 @@ func repoRef(id, namespace string) *corev1.PackageRepositoryReference {
 	}
 }
 
-func newCtrlClient(repos []sourcev1.HelmRepository, charts []sourcev1.HelmChart, releases []helmv2.HelmRelease) withWatchWrapper {
+func newCtrlClient(repos []sourcev1beta2.HelmRepository, charts []sourcev1beta2.HelmChart, releases []helmv2beta2.HelmRelease) withWatchWrapper {
 	// register the flux GitOps Toolkit schema definitions
 	scheme := runtime.NewScheme()
-	sourcev1.AddToScheme(scheme)
-	helmv2.AddToScheme(scheme)
+	err := sourcev1beta2.AddToScheme(scheme)
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = helmv2beta2.AddToScheme(scheme)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	rm := apimeta.NewDefaultRESTMapper([]schema.GroupVersion{sourcev1.GroupVersion, helmv2.GroupVersion})
+	rm := apimeta.NewDefaultRESTMapper([]schema.GroupVersion{sourcev1beta2.GroupVersion, helmv2beta2.GroupVersion})
 	rm.Add(schema.GroupVersionKind{
-		Group:   sourcev1.GroupVersion.Group,
-		Version: sourcev1.GroupVersion.Version,
-		Kind:    sourcev1.HelmRepositoryKind},
+		Group:   sourcev1beta2.GroupVersion.Group,
+		Version: sourcev1beta2.GroupVersion.Version,
+		Kind:    sourcev1beta2.HelmRepositoryKind},
 		apimeta.RESTScopeNamespace)
 	rm.Add(schema.GroupVersionKind{
-		Group:   sourcev1.GroupVersion.Group,
-		Version: sourcev1.GroupVersion.Version,
-		Kind:    sourcev1.HelmChartKind},
+		Group:   sourcev1beta2.GroupVersion.Group,
+		Version: sourcev1beta2.GroupVersion.Version,
+		Kind:    sourcev1beta2.HelmChartKind},
 		apimeta.RESTScopeNamespace)
 	rm.Add(schema.GroupVersionKind{
-		Group:   helmv2.GroupVersion.Group,
-		Version: helmv2.GroupVersion.Version,
-		Kind:    helmv2.HelmReleaseKind},
+		Group:   helmv2beta2.GroupVersion.Group,
+		Version: helmv2beta2.GroupVersion.Version,
+		Kind:    helmv2beta2.HelmReleaseKind},
 		apimeta.RESTScopeNamespace)
 
 	ctrlClientBuilder := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRESTMapper(rm)
 	initLists := []client.ObjectList{}
 	if len(repos) > 0 {
-		initLists = append(initLists, &sourcev1.HelmRepositoryList{Items: repos})
+		initLists = append(initLists, &sourcev1beta2.HelmRepositoryList{Items: repos})
 	}
 	if len(charts) > 0 {
-		initLists = append(initLists, &sourcev1.HelmChartList{Items: charts})
+		initLists = append(initLists, &sourcev1beta2.HelmChartList{Items: charts})
 	}
 	if len(releases) > 0 {
-		initLists = append(initLists, &helmv2.HelmReleaseList{Items: releases})
+		initLists = append(initLists, &helmv2beta2.HelmReleaseList{Items: releases})
 	}
 	if len(initLists) > 0 {
 		ctrlClientBuilder = ctrlClientBuilder.WithLists(initLists...)
@@ -360,11 +400,10 @@ func newCtrlClient(repos []sourcev1.HelmRepository, charts []sourcev1.HelmChart,
 }
 
 func ctrlClientAndWatcher(t *testing.T, s *Server) (client.WithWatch, *watch.RaceFreeFakeWatcher, error) {
-	ctx := context.Background()
-	if ctrlClient, err := s.clientGetter.ControllerRuntime(ctx, s.kubeappsCluster); err != nil {
+	if ctrlClient, err := s.clientGetter.ControllerRuntime(http.Header{}, s.kubeappsCluster); err != nil {
 		return nil, nil, err
 	} else if ww, ok := ctrlClient.(*withWatchWrapper); !ok {
-		return nil, nil, fmt.Errorf("Could not cast %s to: *withWatchWrapper", reflect.TypeOf(ctrlClient))
+		return nil, nil, fmt.Errorf("Could not cast %T to: *withWatchWrapper", ctrlClient)
 	} else if watcher := ww.watcher; watcher == nil {
 		return nil, nil, fmt.Errorf("Unexpected condition watcher is nil")
 	} else {
@@ -382,6 +421,166 @@ func testYaml(name string) string {
 
 func testCert(name string) string {
 	return "./testdata/cert/" + name
+}
+
+func compareAvailablePackageDetail(t *testing.T, actual *corev1.AvailablePackageDetail, expected *corev1.AvailablePackageDetail) {
+	opt1 := cmpopts.IgnoreUnexported(
+		corev1.AvailablePackageDetail{},
+		corev1.AvailablePackageReference{},
+		corev1.Context{},
+		corev1.Maintainer{},
+		plugins.Plugin{},
+		corev1.PackageAppVersion{})
+	// these few fields a bit special in that they are all very long strings,
+	// so we'll do a 'Contains' check for these instead of 'Equals'
+	opt2 := cmpopts.IgnoreFields(corev1.AvailablePackageDetail{}, "Readme", "DefaultValues", "ValuesSchema")
+	if !cmp.Equal(actual, expected, opt1, opt2) {
+		t.Fatalf("mismatch (-want +got):\n%s", cmp.Diff(actual, expected, opt1, opt2))
+	}
+	if !strings.Contains(actual.Readme, expected.Readme) {
+		t.Fatalf("substring mismatch (-want: %s\n+got: %s):\n", expected.Readme, actual.Readme)
+	}
+	if !strings.Contains(actual.DefaultValues, expected.DefaultValues) {
+		t.Fatalf("substring mismatch (-want: %s\n+got: %s):\n", expected.DefaultValues, actual.DefaultValues)
+	}
+	if !strings.Contains(actual.ValuesSchema, expected.ValuesSchema) {
+		t.Fatalf("substring mismatch (-want: %s\n+got: %s):\n", expected.ValuesSchema, actual.ValuesSchema)
+	}
+}
+
+func comparePackageRepositorySummaries(t *testing.T, actual *corev1.GetPackageRepositorySummariesResponse, expected *corev1.GetPackageRepositorySummariesResponse) {
+	opts := cmpopts.IgnoreUnexported(
+		corev1.Context{},
+		corev1.PackageRepositoryReference{},
+		plugins.Plugin{},
+		corev1.PackageRepositoryStatus{},
+		corev1.GetPackageRepositorySummariesResponse{},
+		corev1.PackageRepositorySummary{},
+	)
+
+	// will compare this separately below
+	opts2 := cmpopts.IgnoreFields(corev1.PackageRepositoryStatus{}, "UserReason")
+
+	// cannot simply use cmpopts.SortSlices() due to doing a custom comparison of the UserReason field below.
+	// Also, we don't want side effects from in-line sorting so we make a copies and use it for comparison
+	// (same thing that cmp.Equal() does when you use cmpopts.SortSlices() option)
+	copyA := make([]*corev1.PackageRepositorySummary, len(actual.PackageRepositorySummaries))
+	copy(copyA, actual.PackageRepositorySummaries)
+	sort.Slice(copyA, func(i, j int) bool { return copyA[i].Name < copyA[j].Name })
+
+	copyE := make([]*corev1.PackageRepositorySummary, len(expected.PackageRepositorySummaries))
+	copy(copyE, expected.PackageRepositorySummaries)
+	sort.Slice(copyE, func(i, j int) bool { return copyE[i].Name < copyE[j].Name })
+
+	if !cmp.Equal(copyA, copyE, opts, opts2) {
+		t.Fatalf("mismatch (-want +got):\n%s", cmp.Diff(copyE, copyA, opts, opts, opts2))
+	}
+
+	// now compare UserReasons, mindful of the sort order
+	for i, s := range copyA {
+		if !strings.HasPrefix(s.Status.UserReason, copyE[i].Status.UserReason) {
+			t.Fatalf("substring mismatch (-want: %s\n+got: %s):\n",
+				copyE[i].Status.UserReason,
+				s.Status.UserReason)
+		}
+	}
+}
+
+func comparePackageRepositoryDetail(t *testing.T, actual *corev1.GetPackageRepositoryDetailResponse, expected *corev1.GetPackageRepositoryDetailResponse) {
+	opts1 := cmpopts.IgnoreUnexported(
+		corev1.Context{},
+		corev1.PackageRepositoryReference{},
+		plugins.Plugin{},
+		corev1.GetPackageRepositoryDetailResponse{},
+		corev1.PackageRepositoryDetail{},
+		corev1.PackageRepositoryStatus{},
+		corev1.PackageRepositoryAuth{},
+		corev1.PackageRepositoryTlsConfig{},
+		corev1.SecretKeyReference{},
+		corev1.UsernamePassword{},
+		corev1.TlsCertKey{},
+		corev1.DockerCredentials{},
+	)
+
+	opts2 := cmpopts.IgnoreFields(corev1.PackageRepositoryStatus{}, "UserReason")
+
+	if !cmp.Equal(expected, actual, opts1, opts2) {
+		t.Fatalf("mismatch (-want +got):\n%s", cmp.Diff(expected, actual, opts1, opts2))
+	}
+
+	if !strings.HasPrefix(actual.GetDetail().Status.UserReason, expected.Detail.Status.UserReason) {
+		t.Fatalf("unexpected response (status.UserReason): (-want +got):\n- %s\n+ %s",
+			expected.Detail.Status.UserReason,
+			actual.GetDetail().Status.UserReason)
+	}
+}
+
+func compareInstalledPackageDetail(t *testing.T, actual *corev1.GetInstalledPackageDetailResponse, expected *corev1.GetInstalledPackageDetailResponse) {
+	opts := cmpopts.IgnoreUnexported(
+		corev1.GetInstalledPackageDetailResponse{},
+		corev1.InstalledPackageDetail{},
+		corev1.InstalledPackageReference{},
+		corev1.Context{},
+		corev1.VersionReference{},
+		corev1.InstalledPackageStatus{},
+		corev1.PackageAppVersion{},
+		plugins.Plugin{},
+		corev1.ReconciliationOptions{},
+		corev1.AvailablePackageReference{})
+	// see comment in release_integration_test.go. Intermittently we get an inconsistent error message from flux
+	opts2 := cmpopts.IgnoreFields(corev1.InstalledPackageStatus{}, "UserReason")
+
+	// Values Applied are JSON string and need to be compared as such
+	opts3 := cmpopts.IgnoreFields(corev1.InstalledPackageDetail{}, "ValuesApplied")
+	if !cmp.Equal(expected, actual, opts, opts2, opts3) {
+		t.Fatalf("mismatch (-want +got):\n%s", cmp.Diff(expected, actual, opts, opts2, opts3))
+	}
+	if !strings.Contains(actual.InstalledPackageDetail.Status.UserReason, expected.InstalledPackageDetail.Status.UserReason) {
+		t.Fatalf("substring mismatch (-want: %s\n+got: %s):\n", expected.InstalledPackageDetail.Status.UserReason, actual.InstalledPackageDetail.Status.UserReason)
+	}
+	compareJSONStrings(t, expected.InstalledPackageDetail.ValuesApplied, actual.InstalledPackageDetail.ValuesApplied)
+}
+
+func compareAvailablePackageSummaries(t *testing.T, actual *corev1.GetAvailablePackageSummariesResponse, expected *corev1.GetAvailablePackageSummariesResponse) {
+	opt1 := cmpopts.IgnoreUnexported(
+		corev1.GetAvailablePackageSummariesResponse{},
+		corev1.AvailablePackageSummary{},
+		corev1.AvailablePackageReference{},
+		corev1.Context{},
+		plugins.Plugin{},
+		corev1.PackageAppVersion{})
+	opt2 := cmpopts.SortSlices(lessAvailablePackageFunc)
+
+	if !cmp.Equal(actual, expected, opt1, opt2) {
+		t.Fatalf("mismatch (-want +got):\n%s", cmp.Diff(expected, actual, opt1, opt2))
+	}
+}
+
+func compareAvailablePackageVersions(t *testing.T, actual *corev1.GetAvailablePackageVersionsResponse, expected *corev1.GetAvailablePackageVersionsResponse) {
+	opts := cmpopts.IgnoreUnexported(
+		corev1.GetAvailablePackageVersionsResponse{},
+		corev1.PackageAppVersion{})
+	if !cmp.Equal(expected, actual, opts) {
+		t.Fatalf("mismatch (-want +got):\n%s", cmp.Diff(expected, actual, opts))
+	}
+}
+
+func compareInstalledPackageSummaries(t *testing.T, actual *corev1.GetInstalledPackageSummariesResponse, expected *corev1.GetInstalledPackageSummariesResponse) {
+	opts := cmpopts.SortSlices(lessInstalledPackageSummaryFunc)
+
+	opts2 := cmpopts.IgnoreUnexported(
+		corev1.GetInstalledPackageSummariesResponse{},
+		corev1.InstalledPackageSummary{},
+		corev1.InstalledPackageReference{},
+		corev1.InstalledPackageStatus{},
+		plugins.Plugin{},
+		corev1.VersionReference{},
+		corev1.PackageAppVersion{},
+		corev1.Context{})
+
+	if !cmp.Equal(expected, actual, opts, opts2) {
+		t.Fatalf("mismatch (-want +got):\n%s", cmp.Diff(expected, actual, opts, opts2))
+	}
 }
 
 // misc global vars that get re-used in multiple tests

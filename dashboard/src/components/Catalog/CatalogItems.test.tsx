@@ -1,41 +1,45 @@
-// Copyright 2020-2022 the Kubeapps contributors.
+// Copyright 2020-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import InfoCard from "components/InfoCard";
-import { AvailablePackageSummary, Context } from "gen/kubeappsapis/core/packages/v1alpha1/packages";
-import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins";
+import {
+  AvailablePackageReference,
+  AvailablePackageSummary,
+  Context,
+  PackageAppVersion,
+} from "gen/kubeappsapis/core/packages/v1alpha1/packages_pb";
+import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins_pb";
 import { defaultStore, mountWrapper } from "shared/specs/mountWrapper";
-import { IClusterServiceVersion } from "shared/types";
-import { PluginNames } from "shared/utils";
+import { IClusterServiceVersion, PluginNames } from "shared/types";
 import CatalogItem from "./CatalogItem";
 import CatalogItems, { ICatalogItemsProps } from "./CatalogItems";
 
-const availablePackageSummary1: AvailablePackageSummary = {
+const availablePackageSummary1 = new AvailablePackageSummary({
   name: "foo",
   categories: [],
   displayName: "foo",
   iconUrl: "",
-  latestVersion: { appVersion: "v1.0.0", pkgVersion: "" },
+  latestVersion: new PackageAppVersion({ appVersion: "v1.0.0", pkgVersion: "" }),
   shortDescription: "",
-  availablePackageRef: {
+  availablePackageRef: new AvailablePackageReference({
     identifier: "foo/foo",
     context: { cluster: "", namespace: "package-namespace" } as Context,
     plugin: { name: "my.plugin", version: "0.0.1" } as Plugin,
-  },
-};
-const availablePackageSummary2: AvailablePackageSummary = {
+  }),
+});
+const availablePackageSummary2 = new AvailablePackageSummary({
   name: "bar",
   categories: ["Database"],
   displayName: "bar",
   iconUrl: "",
-  latestVersion: { appVersion: "v2.0.0", pkgVersion: "" },
+  latestVersion: new PackageAppVersion({ appVersion: "v2.0.0", pkgVersion: "" }),
   shortDescription: "",
-  availablePackageRef: {
+  availablePackageRef: new AvailablePackageReference({
     identifier: "bar/bar",
     context: { cluster: "", namespace: "package-namespace" } as Context,
     plugin: { name: "my.plugin", version: "0.0.1" } as Plugin,
-  },
-};
+  }),
+});
 const csv = {
   metadata: {
     name: "test-csv",
@@ -133,7 +137,7 @@ it("changes the bgIcon based on the plugin name - default", () => {
       .find(InfoCard)
       .findWhere(s => s.prop("link")?.includes(pluginName))
       .prop("bgIcon"),
-  ).toBe("placeholder.png");
+  ).toBe("placeholder.svg");
 });
 
 it("changes the bgIcon based on the plugin name - helm", () => {

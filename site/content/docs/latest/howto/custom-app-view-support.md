@@ -1,12 +1,12 @@
 # Custom App View Support
 
-In addition to our [custom form component support](https://github.com/vmware-tanzu/kubeapps/blob/main/site/content/docs/latest/howto/custom-form-component-support.md) we now support the ability for developers to inject custom app views for specific deployments.
+Kubeapps supports the ability for developers to inject custom app views for specific deployments.
 
 ## Step-by-step integration process
 
 1. First you will need a react component to render instead of the default Kubeapps Application View. You're React components must be compiled into a JS file so that they can be interpreted by the browser since they cannot natively parse `.jsx` or `.tsx` files. You can compile `jsx` or `tsx` into js with tools like webpack, create-react-app, babel, etc. If you just want to try this feature out and you don't have a component yet we provide some test files you can try (Do not try to load the `jsx` file since browsers cannot parse it! We simply include it so that you can see the pre-compiled version of the `.js` files).
 
-1. Next you will need to define which applications you would like to render the custom view for. To do this we simply set `.Values.dashboard.customAppViews` to any application of your choice. For example, if you wanted to load a custom view for the [bitnami apache helm chart](https://github.com/bitnami/charts/tree/master/bitnami/apache) you can set the value as such:
+1. Next you will need to define which applications you would like to render the custom view for. To do this we simply set `.Values.dashboard.customAppViews` to any application of your choice. For example, if you wanted to load a custom view for the [bitnami apache helm chart](https://github.com/bitnami/charts/tree/main/bitnami/apache) you can set the value as such:
 
    ```yaml
    customAppViews:
@@ -17,10 +17,10 @@ In addition to our [custom form component support](https://github.com/vmware-tan
 
    This will tell the frontend to load the custom bundle for the apache helm chart in the bitnami repo.
 
-1. And just like the custom form components the bundle can be added via the command line:
+1. The bundle can be added via the command line:
 
    ```bash
-   helm install  bitnami/kubeapps --set-file dashboard.customComponents=*path to file* <other_flags>
+   helm install oci://registry-1.docker.io/bitnamicharts/kubeapps --set-file dashboard.customComponents=*path to file* <other_flags>
    ```
 
    Note: The file can be located anywhere on your file system or even a remote source!

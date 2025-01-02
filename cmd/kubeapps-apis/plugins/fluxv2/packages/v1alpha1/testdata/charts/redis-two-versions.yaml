@@ -1,6 +1,7 @@
 # Copyright 2021-2022 the Kubeapps contributors.
 # SPDX-License-Identifier: Apache-2.0
 
+---
 apiVersion: v1
 entries:
   redis:
@@ -20,7 +21,7 @@ entries:
         a data structure server since keys can contain strings, hashes, lists, sets
         and sorted sets.
       digest: 43374837646a67539eb2999cd8973dc54e8fcdc14896761e594b9d616734edf2
-      home: https://github.com/bitnami/charts/tree/master/bitnami/redis
+      home: https://github.com/bitnami/charts/tree/main/bitnami/redis
       icon: https://bitnami.com/assets/stacks/redis/img/redis-stack-220x234.png
       keywords:
         - redis
@@ -55,7 +56,7 @@ entries:
         a data structure server since keys can contain strings, hashes, lists, sets
         and sorted sets.
       digest: 4fa6f92f3fb7c9b1a4207d5f7293712708bed95ca3a44b84dff74decb6ce3c90
-      home: https://github.com/bitnami/charts/tree/master/bitnami/redis
+      home: https://github.com/bitnami/charts/tree/main/bitnami/redis
       icon: https://bitnami.com/assets/stacks/redis/img/redis-stack-220x234.png
       keywords:
         - redis

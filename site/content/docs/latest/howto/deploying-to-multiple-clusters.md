@@ -1,5 +1,7 @@
 # Configuring Kubeapps for multiple clusters
 
+<!-- TODO(agamez): piece of docs requiring update. Reason: screenshots using old Kubeapps logo -->
+
 It is now possible to configure Kubeapps to target other clusters when deploying a chart, in addition to the cluster on which Kubeapps is itself deployed.
 
 Once configured, you can select the cluster to which you are deploying in the same way that you can already select the namespace to which you are deploying:
@@ -131,7 +133,7 @@ Updating the value of the `clusters` chart option is just like updating any othe
 So if you had originally installed Kubeapps with a command like:
 
 ```bash
-helm install kubeapps bitnami/kubeapps --namespace kubeapps --values ./path/to/my/values.yaml
+helm install kubeapps oci://registry-1.docker.io/bitnamicharts/kubeapps --namespace kubeapps --values ./path/to/my/values.yaml
 ```
 
 then to modify the clusters configured for Kubeapps at some later point you will need to

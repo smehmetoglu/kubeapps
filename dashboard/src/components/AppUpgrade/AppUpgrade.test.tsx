@@ -1,8 +1,8 @@
-// Copyright 2018-2022 the Kubeapps contributors.
+// Copyright 2018-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import actions from "actions";
-import Alert from "components/js/Alert";
+import AlertGroup from "components/AlertGroup";
 import LoadingWrapper from "components/LoadingWrapper";
 import {
   AvailablePackageDetail,
@@ -13,22 +13,26 @@ import {
   InstalledPackageStatus_StatusReason,
   PackageAppVersion,
   VersionReference,
-} from "gen/kubeappsapis/core/packages/v1alpha1/packages";
-import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins";
+} from "gen/kubeappsapis/core/packages/v1alpha1/packages_pb";
+import {
+  PackageRepositoryDetail,
+  PackageRepositorySummary,
+} from "gen/kubeappsapis/core/packages/v1alpha1/repositories_pb";
+import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins_pb";
 import * as ReactRedux from "react-redux";
 import * as ReactRouter from "react-router";
-import { MemoryRouter, Route } from "react-router-dom";
-import { IAppRepositoryState } from "reducers/repos";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { IPackageRepositoryState } from "reducers/repos";
 import { defaultStore, getStore, mountWrapper } from "shared/specs/mountWrapper";
 import {
   CustomInstalledPackageDetail,
   FetchError,
-  IAppRepository,
   IInstalledPackageState,
   IPackageState,
+  IStoreState,
+  PluginNames,
   UpgradeError,
 } from "shared/types";
-import { PluginNames } from "shared/utils";
 import SelectRepoForm from "../SelectRepoForm/SelectRepoForm";
 import UpgradeForm from "../UpgradeForm/UpgradeForm";
 import AppUpgrade from "./AppUpgrade";
@@ -53,19 +57,18 @@ const installedPackage1 = {
     plugin: { name: "my.plugin", version: "0.0.1" } as Plugin,
   } as AvailablePackageReference,
   currentVersion: { appVersion: "10.0.0", pkgVersion: "1.0.0" } as PackageAppVersion,
-  installedPackageRef: {
+  installedPackageRef: new InstalledPackageReference({
     identifier: "stable/bar",
-    pkgVersion: "1.0.0",
     context: { cluster: defaultProps.cluster, namespace: defaultProps.repoNamespace } as Context,
     plugin: { name: "my.plugin", version: "0.0.1" } as Plugin,
-  } as InstalledPackageReference,
+  }),
   latestMatchingVersion: { appVersion: "10.0.0", pkgVersion: "1.0.0" } as PackageAppVersion,
   latestVersion: { appVersion: "10.0.0", pkgVersion: "1.0.0" } as PackageAppVersion,
   pkgVersionReference: { version: "1" } as VersionReference,
   reconciliationOptions: {},
   status: {
     ready: true,
-    reason: InstalledPackageStatus_StatusReason.STATUS_REASON_INSTALLED,
+    reason: InstalledPackageStatus_StatusReason.INSTALLED,
     userReason: "deployed",
   } as InstalledPackageStatus,
 } as CustomInstalledPackageDetail;
@@ -84,28 +87,73 @@ const selectedPackage = {
   availablePackageDetail: { name: "test" } as AvailablePackageDetail,
 } as IPackageState["selected"];
 
-const repo1 = {
-  metadata: {
-    name: defaultProps.repo,
-    namespace: defaultProps.repoNamespace,
+const repo1Summary = {
+  name: defaultProps.repo,
+  packageRepoRef: {
+    context: { namespace: defaultProps.repoNamespace, cluster: defaultProps.cluster },
+    identifier: defaultProps.repo,
+    plugin: defaultProps.plugin,
   },
-} as IAppRepository;
+} as PackageRepositorySummary;
+
+const repo1Detail = {
+  name: defaultProps.repo,
+  packageRepoRef: {
+    context: { namespace: defaultProps.repoNamespace, cluster: defaultProps.cluster },
+    identifier: defaultProps.repo,
+    plugin: defaultProps.plugin,
+  },
+} as PackageRepositoryDetail;
 
 let spyOnUseDispatch: jest.SpyInstance;
-let spyOnUseHistory: jest.SpyInstance;
+let spyOnUseNavigate: jest.SpyInstance;
 
 beforeEach(() => {
   const mockDispatch = jest.fn();
   spyOnUseDispatch = jest.spyOn(ReactRedux, "useDispatch").mockReturnValue(mockDispatch);
-  spyOnUseHistory = jest
-    .spyOn(ReactRouter, "useHistory")
-    .mockReturnValue({ push: jest.fn() } as any);
+  spyOnUseNavigate = jest.spyOn(ReactRouter, "useNavigate").mockReturnValue(jest.fn());
+  // mock the window.matchMedia for selecting the theme
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    configurable: true,
+    value: jest.fn().mockImplementation(query => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: jest.fn(),
+      removeListener: jest.fn(),
+      addEventListener: jest.fn(),
+      removeEventListener: jest.fn(),
+      dispatchEvent: jest.fn(),
+    })),
+  });
+
+  // mock the window.ResizeObserver, required by the MonacoDiffEditor for the layout
+  Object.defineProperty(window, "ResizeObserver", {
+    writable: true,
+    configurable: true,
+    value: jest.fn().mockImplementation(() => ({
+      observe: jest.fn(),
+      unobserve: jest.fn(),
+      disconnect: jest.fn(),
+    })),
+  });
+
+  // mock the window.HTMLCanvasElement.getContext(), required by the MonacoDiffEditor for the layout
+  Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
+    writable: true,
+    configurable: true,
+    value: jest.fn().mockImplementation(() => ({
+      clearRect: jest.fn(),
+      fillRect: jest.fn(),
+    })),
+  });
 });
 
 afterEach(() => {
   jest.restoreAllMocks();
   spyOnUseDispatch.mockRestore();
-  spyOnUseHistory.mockRestore();
+  spyOnUseNavigate.mockRestore();
 });
 
 const routePathParam = `/c/${defaultProps.cluster}/ns/${defaultProps.namespace}/apps/${defaultProps.plugin.name}/${defaultProps.plugin.version}/${defaultProps.releaseName}/upgrade`;
@@ -118,12 +166,13 @@ it("renders the repo selection form if not introduced", () => {
     } as IInstalledPackageState,
   };
   const wrapper = mountWrapper(
-    getStore({ ...defaultStore, ...state }),
+    getStore({ ...defaultStore, ...state } as Partial<IStoreState>),
     <MemoryRouter initialEntries={[routePathParam]}>
-      <Route path={routePath}>
-        <AppUpgrade />,
-      </Route>
+      <Routes>
+        <Route path={routePath} element={<AppUpgrade />} />
+      </Routes>
     </MemoryRouter>,
+    false,
   );
   expect(wrapper.find(LoadingWrapper).prop("loaded")).toBe(false);
 });
@@ -131,8 +180,8 @@ it("renders the repo selection form if not introduced", () => {
 it("renders the repo selection form if not introduced when the app is loaded", () => {
   const state = {
     repos: {
-      repos: [repo1],
-    } as IAppRepositoryState,
+      reposSummaries: [repo1Summary],
+    } as IPackageRepositoryState,
     apps: {
       selected: { name: "foo" },
       isFetching: false,
@@ -143,15 +192,16 @@ it("renders the repo selection form if not introduced when the app is loaded", (
     getStore({
       ...defaultStore,
       ...state,
-    }),
+    } as Partial<IStoreState>),
     <MemoryRouter initialEntries={[routePathParam]}>
-      <Route path={routePath}>
-        <AppUpgrade />,
-      </Route>
+      <Routes>
+        <Route path={routePath} element={<AppUpgrade />} />
+      </Routes>
     </MemoryRouter>,
+    false,
   );
   expect(wrapper.find(SelectRepoForm)).toExist();
-  expect(wrapper.find(Alert)).not.toExist();
+  expect(wrapper.find(AlertGroup)).not.toExist();
   expect(wrapper.find(UpgradeForm)).not.toExist();
 });
 
@@ -166,15 +216,16 @@ describe("when an error exists", () => {
       getStore({
         ...defaultStore,
         ...state,
-      }),
+      } as Partial<IStoreState>),
       <MemoryRouter initialEntries={[routePathParam]}>
-        <Route path={routePath}>
-          <AppUpgrade />,
-        </Route>
+        <Routes>
+          <Route path={routePath} element={<AppUpgrade />} />
+        </Routes>
       </MemoryRouter>,
+      false,
     );
 
-    expect(wrapper.find(Alert)).toExist();
+    expect(wrapper.find(AlertGroup)).toExist();
     expect(wrapper.find(SelectRepoForm)).not.toExist();
     expect(wrapper.find(UpgradeForm)).not.toExist();
 
@@ -184,8 +235,8 @@ describe("when an error exists", () => {
   it("renders a warning message if there are no repositories", () => {
     const state = {
       repos: {
-        repos: [] as IAppRepository[],
-      } as IAppRepositoryState,
+        reposSummaries: [] as PackageRepositorySummary[],
+      } as IPackageRepositoryState,
       apps: {
         selected: { name: "foo" },
         isFetching: false,
@@ -196,17 +247,18 @@ describe("when an error exists", () => {
       getStore({
         ...defaultStore,
         ...state,
-      }),
+      } as Partial<IStoreState>),
       <MemoryRouter initialEntries={[routePathParam]}>
-        <Route path={routePath}>
-          <AppUpgrade />,
-        </Route>
+        <Routes>
+          <Route path={routePath} element={<AppUpgrade />} />
+        </Routes>
       </MemoryRouter>,
+      false,
     );
-    expect(wrapper.find(SelectRepoForm).find(Alert)).toExist();
+    expect(wrapper.find(SelectRepoForm).find(AlertGroup)).toExist();
     expect(wrapper.find(UpgradeForm)).not.toExist();
 
-    expect(wrapper.find(Alert).children().text()).toContain("Repositories not found");
+    expect(wrapper.find(AlertGroup).children().text()).toContain("No repositories found");
   });
 
   it("still renders the upgrade form even if there is an upgrade error", () => {
@@ -224,15 +276,16 @@ describe("when an error exists", () => {
       getStore({
         ...defaultStore,
         ...state,
-      }),
+      } as Partial<IStoreState>),
       <MemoryRouter initialEntries={[routePathParam]}>
-        <Route path={routePath}>
-          <AppUpgrade />,
-        </Route>
+        <Routes>
+          <Route path={routePath} element={<AppUpgrade />} />
+        </Routes>
       </MemoryRouter>,
+      false,
     );
     expect(wrapper.find(UpgradeForm)).toExist();
-    expect(wrapper.find(UpgradeForm).find(Alert)).toIncludeText(upgradeError.message);
+    expect(wrapper.find(UpgradeForm).find(AlertGroup)).toIncludeText(upgradeError.message);
   });
 });
 
@@ -249,25 +302,26 @@ it("renders the upgrade form when the repo is available, clears state and fetche
       selectedDetails: availablePackageDetail,
     } as IInstalledPackageState,
     repos: {
-      repo: repo1,
-      repos: [repo1],
+      repoDetail: repo1Detail,
+      reposSummaries: [repo1Summary],
       isFetching: false,
-    } as IAppRepositoryState,
+    } as IPackageRepositoryState,
     packages: { selected: selectedPackage } as IPackageState,
   };
   const wrapper = mountWrapper(
     getStore({
       ...defaultStore,
       ...state,
-    }),
+    } as Partial<IStoreState>),
     <MemoryRouter initialEntries={[routePathParam]}>
-      <Route path={routePath}>
-        <AppUpgrade />,
-      </Route>
+      <Routes>
+        <Route path={routePath} element={<AppUpgrade />} />
+      </Routes>
     </MemoryRouter>,
+    false,
   );
   expect(wrapper.find(UpgradeForm)).toExist();
-  expect(wrapper.find(Alert)).not.toExist();
+  expect(wrapper.find(AlertGroup)).not.toExist();
   expect(wrapper.find(SelectRepoForm)).not.toExist();
 
   expect(resetSelectedAvailablePackageDetail).toHaveBeenCalled();
@@ -285,22 +339,23 @@ it("renders the upgrade form with the version property", () => {
       selectedDetails: availablePackageDetail,
     } as IInstalledPackageState,
     repos: {
-      repo: repo1,
-      repos: [repo1],
+      repoDetail: repo1Detail,
+      reposSummaries: [repo1Summary],
       isFetching: false,
-    } as IAppRepositoryState,
+    } as Partial<IPackageRepositoryState>,
     packages: { selected: selectedPackage } as IPackageState,
   };
   const wrapper = mountWrapper(
     getStore({
       ...defaultStore,
       ...state,
-    }),
+    } as Partial<IStoreState>),
     <MemoryRouter initialEntries={[routePathParam + "/0.0.1"]}>
-      <Route path={routePath + "/:version"}>
-        <AppUpgrade />,
-      </Route>
+      <Routes>
+        <Route path={routePath + "/:version"} element={<AppUpgrade />} />
+      </Routes>
     </MemoryRouter>,
+    false,
   );
   expect(wrapper.find(UpgradeForm)).toExist();
   expect(wrapper.find(UpgradeForm)).toHaveProp("version", "0.0.1");
@@ -313,24 +368,25 @@ it("skips the repo selection form if the app contains upgrade info", () => {
       selectedDetails: availablePackageDetail,
     } as IInstalledPackageState,
     repos: {
-      repo: repo1,
-      repos: [repo1],
+      repoDetail: repo1Detail,
+      reposSummaries: [repo1Summary],
       isFetching: false,
-    } as IAppRepositoryState,
+    } as IPackageRepositoryState,
     packages: { selected: selectedPackage } as IPackageState,
   };
   const wrapper = mountWrapper(
     getStore({
       ...defaultStore,
       ...state,
-    }),
+    } as Partial<IStoreState>),
     <MemoryRouter initialEntries={[routePathParam]}>
-      <Route path={routePath}>
-        <AppUpgrade />,
-      </Route>
+      <Routes>
+        <Route path={routePath} element={<AppUpgrade />} />
+      </Routes>
     </MemoryRouter>,
+    false,
   );
   expect(wrapper.find(UpgradeForm)).toExist();
-  expect(wrapper.find(Alert)).not.toExist();
+  expect(wrapper.find(AlertGroup)).not.toExist();
   expect(wrapper.find(SelectRepoForm)).not.toExist();
 });

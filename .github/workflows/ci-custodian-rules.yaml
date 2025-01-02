@@ -1,7 +1,8 @@
 # Copyright 2022 the Kubeapps contributors.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Custodian rules for Kubeapps
+---
+name: Kubeapps Custodian Rules
 on:
   schedule:
     - cron: "0 8 * * *"
@@ -14,7 +15,7 @@ jobs:
     if: github.repository == 'vmware-tanzu/kubeapps'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: gscho/setup-cloud-custodian@v1
         with:
           include-gcp: true

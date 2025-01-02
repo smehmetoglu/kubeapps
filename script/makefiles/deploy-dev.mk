@@ -1,4 +1,4 @@
-# Copyright 2021-2022 the Kubeapps contributors.
+# Copyright 2021-2023 the Kubeapps contributors.
 # SPDX-License-Identifier: Apache-2.0
 
 # Deploy a dev environment of Kubeapps using OIDC for authentication with a
@@ -31,14 +31,15 @@ deploy-dependencies: deploy-dex deploy-openldap devel/localhost-cert.pem
 		--key ./devel/localhost-key.pem \
 		--cert ./devel/localhost-cert.pem
 	kubectl --kubeconfig=${CLUSTER_CONFIG} -n kubeapps create secret generic postgresql-db \
-		--from-literal=postgres-postgres-password=dev-only-fake-password \
-		--from-literal=postgres-password=dev-only-fake-password
+		--from-literal=postgres-password=dev-only-fake-password \
+		--from-literal=password=dev-only-fake-password
 
 deploy-dev-kubeapps:
 	helm --kubeconfig=${CLUSTER_CONFIG} upgrade --install kubeapps ./chart/kubeapps --namespace kubeapps --create-namespace \
 		--values ./site/content/docs/latest/reference/manifests/kubeapps-local-dev-values.yaml \
 		--values ./site/content/docs/latest/reference/manifests/kubeapps-local-dev-auth-proxy-values.yaml \
-		--values ./site/content/docs/latest/reference/manifests/kubeapps-local-dev-additional-kind-cluster.yaml
+		--values ./site/content/docs/latest/reference/manifests/kubeapps-local-dev-additional-kind-cluster.yaml \
+		--set clusters[1].serviceToken=$(shell kubectl --kubeconfig=${ADDITIONAL_CLUSTER_CONFIG} get secret kubeapps-namespace-discovery -o go-template="{{.data.token | base64decode}}")
 
 deploy-dev: deploy-dependencies deploy-dev-kubeapps
 	@echo "\nYou can now simply open your browser at https://localhost/ to access Kubeapps!"
@@ -56,13 +57,18 @@ reset-dev-kubeapps:
 # The kapp-controller support for the new Package and PackageRepository CRDs is currently
 # only available in an alpha release.
 deploy-kapp-controller:
-	kubectl --kubeconfig=${CLUSTER_CONFIG} apply -f https://github.com/vmware-tanzu/carvel-kapp-controller/releases/download/v0.35.0/release.yml
+	kubectl --kubeconfig=${CLUSTER_CONFIG} apply -f https://github.com/vmware-tanzu/carvel-kapp-controller/releases/download/v0.41.2/release.yml
 	kubectl --kubeconfig=${CLUSTER_CONFIG} apply -f https://raw.githubusercontent.com/vmware-tanzu/carvel-kapp-controller/develop/examples/packaging-with-repo/package-repository.yml
 	kubectl --kubeconfig=${CLUSTER_CONFIG} apply -f ./site/content/docs/latest/reference/manifests/tce-package-repository.yaml
 
+deploy-kapp-controller-additional:
+	kubectl --kubeconfig=${ADDITIONAL_CLUSTER_CONFIG} apply -f https://github.com/vmware-tanzu/carvel-kapp-controller/releases/download/v0.41.2/release.yml
+	kubectl --kubeconfig=${ADDITIONAL_CLUSTER_CONFIG} apply -f https://raw.githubusercontent.com/vmware-tanzu/carvel-kapp-controller/develop/examples/packaging-with-repo/package-repository.yml
+	kubectl --kubeconfig=${ADDITIONAL_CLUSTER_CONFIG} apply -f ./site/content/docs/latest/reference/manifests/tce-package-repository.yaml
+
 # Add the flux controllers used for testing the kubeapps-apis integration.
 deploy-flux-controllers:
-	kubectl --kubeconfig=${CLUSTER_CONFIG} apply -f https://github.com/fluxcd/flux2/releases/download/v0.31.3/install.yaml
+	kubectl --kubeconfig=${CLUSTER_CONFIG} apply -f https://github.com/fluxcd/flux2/releases/download/v0.37.0/install.yaml
 
 reset-dev:
 	helm --kubeconfig=${CLUSTER_CONFIG} -n kubeapps delete kubeapps  || true

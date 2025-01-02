@@ -1,4 +1,4 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2024 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 import {
@@ -7,14 +7,17 @@ import {
   AvailablePackageSummary,
   Context,
   GetAvailablePackageDetailResponse,
+  GetAvailablePackageMetadatasResponse,
   GetAvailablePackageSummariesResponse,
   GetAvailablePackageVersionsResponse,
-} from "gen/kubeappsapis/core/packages/v1alpha1/packages";
-import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins";
+  PackageAppVersion,
+  PackageMetadata,
+} from "gen/kubeappsapis/core/packages/v1alpha1/packages_pb";
+import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins_pb";
 import configureMockStore from "redux-mock-store";
 import thunk from "redux-thunk";
 import PackagesService from "shared/PackagesService";
-import { FetchError, IReceivePackagesActionPayload } from "shared/types";
+import { FetchError, IReceivePackagesActionPayload, IStoreState } from "shared/types";
 import { getType } from "typesafe-actions";
 import actions from ".";
 
@@ -29,21 +32,21 @@ const defaultPaginationToken = "defaultPaginationToken";
 const defaultSize = 0;
 const plugin = { name: "my.plugin", version: "0.0.1" } as Plugin;
 
-const defaultAvailablePackageSummary: AvailablePackageSummary = {
+const defaultAvailablePackageSummary = new AvailablePackageSummary({
   name: "foo",
   categories: [""],
   displayName: "foo",
   iconUrl: "",
-  latestVersion: { appVersion: "v1.0.0", pkgVersion: "" },
+  latestVersion: new PackageAppVersion({ appVersion: "v1.0.0", pkgVersion: "" }),
   shortDescription: "",
-  availablePackageRef: {
+  availablePackageRef: new AvailablePackageReference({
     identifier: "foo/foo",
     context: { cluster: "", namespace: "package-namespace" } as Context,
     plugin: plugin,
-  },
-};
+  }),
+});
 
-const defaultAvailablePackageDetail: AvailablePackageDetail = {
+const defaultAvailablePackageDetail = new AvailablePackageDetail({
   name: "foo",
   categories: [""],
   displayName: "foo",
@@ -60,16 +63,21 @@ const defaultAvailablePackageDetail: AvailablePackageDetail = {
   },
   valuesSchema: "",
   defaultValues: "",
+  additionalDefaultValues: {},
   maintainers: [],
   readme: "",
   version: {
     pkgVersion: "1.2.3",
     appVersion: "4.5.6",
   },
-};
+});
 
 beforeEach(() => {
-  store = mockStore();
+  store = mockStore({
+    packages: {
+      isFetching: false,
+    },
+  } as Partial<IStoreState>);
 });
 
 afterEach(() => {
@@ -92,11 +100,11 @@ const nextPageToken = "nextPageToken";
 const fetchAvailablePackageSummariesTestCases: IfetchAvailablePackageSummariesTestCase[] = [
   {
     name: "fetches packages with query",
-    response: {
+    response: new GetAvailablePackageSummariesResponse({
       availablePackageSummaries: [defaultAvailablePackageSummary],
       nextPageToken,
       categories: ["foo"],
-    },
+    }),
     requestedRepos: "",
     requestedPageToken: currentPageToken,
     requestedQuery: "foo",
@@ -121,11 +129,11 @@ const fetchAvailablePackageSummariesTestCases: IfetchAvailablePackageSummariesTe
   },
   {
     name: "fetches packages from a repo (first page)",
-    response: {
+    response: new GetAvailablePackageSummariesResponse({
       availablePackageSummaries: [defaultAvailablePackageSummary],
       nextPageToken,
       categories: ["foo"],
-    },
+    }),
     requestedRepos: repos,
     requestedPageToken: "",
     expectedActions: [
@@ -146,11 +154,11 @@ const fetchAvailablePackageSummariesTestCases: IfetchAvailablePackageSummariesTe
   },
   {
     name: "fetches packages from a repo (middle page)",
-    response: {
+    response: new GetAvailablePackageSummariesResponse({
       availablePackageSummaries: [defaultAvailablePackageSummary],
       nextPageToken,
       categories: ["foo"],
-    },
+    }),
     requestedRepos: repos,
     requestedPageToken: currentPageToken,
     expectedActions: [
@@ -174,11 +182,11 @@ const fetchAvailablePackageSummariesTestCases: IfetchAvailablePackageSummariesTe
   },
   {
     name: "fetches packages from a repo (last page)",
-    response: {
+    response: new GetAvailablePackageSummariesResponse({
       availablePackageSummaries: [defaultAvailablePackageSummary],
       nextPageToken: "",
       categories: ["foo"],
-    },
+    }),
     requestedRepos: repos,
     requestedPageToken: currentPageToken,
     expectedActions: [
@@ -202,11 +210,11 @@ const fetchAvailablePackageSummariesTestCases: IfetchAvailablePackageSummariesTe
   },
   {
     name: "fetches packages from a repo (already processed page)",
-    response: {
+    response: new GetAvailablePackageSummariesResponse({
       availablePackageSummaries: [defaultAvailablePackageSummary],
       nextPageToken,
       categories: ["foo"],
-    },
+    }),
     requestedRepos: repos,
     requestedPageToken: currentPageToken,
     expectedActions: [
@@ -230,11 +238,11 @@ const fetchAvailablePackageSummariesTestCases: IfetchAvailablePackageSummariesTe
   },
   {
     name: "fetches packages from a repo (off-limits page)",
-    response: {
+    response: new GetAvailablePackageSummariesResponse({
       availablePackageSummaries: [defaultAvailablePackageSummary],
       nextPageToken: "3",
       categories: ["foo"],
-    },
+    }),
     requestedRepos: repos,
     requestedPageToken: "next-page-token",
     expectedActions: [
@@ -375,9 +383,9 @@ describe("fetchAvailablePackageSummaries", () => {
 
 describe("fetchAvailablePackageVersions", () => {
   const packageAppVersions = [{ pkgVersion: "1.2.3", appVersion: "4.5.6" }];
-  const availableVersionsResponse: GetAvailablePackageVersionsResponse = {
+  const availableVersionsResponse = new GetAvailablePackageVersionsResponse({
     packageAppVersions,
-  };
+  });
   let mockGetAvailablePackageVersions: jest.Mock;
   beforeEach(() => {
     mockGetAvailablePackageVersions = jest
@@ -417,9 +425,9 @@ describe("fetchAvailablePackageVersions", () => {
 describe("fetchAndSelectAvailablePackageDetail", () => {
   let mockGetAvailablePackageDetail: jest.Mock;
   beforeEach(() => {
-    const response: GetAvailablePackageDetailResponse = {
+    const response = new GetAvailablePackageDetailResponse({
       availablePackageDetail: defaultAvailablePackageDetail,
-    };
+    });
     mockGetAvailablePackageDetail = jest.fn().mockImplementation(() => Promise.resolve(response));
     jest
       .spyOn(PackagesService, "getAvailablePackageDetail")
@@ -500,6 +508,84 @@ describe("fetchAndSelectAvailablePackageDetail", () => {
     ];
     await store.dispatch(
       actions.availablepackages.fetchAndSelectAvailablePackageDetail(
+        {
+          context: { cluster: cluster, namespace: namespace },
+          identifier: "foo",
+          plugin: plugin,
+        } as AvailablePackageReference,
+        "1.0.0",
+      ),
+    );
+    expect(store.getActions()).toEqual(expectedActions);
+  });
+});
+
+describe("fetchAvailablePackageMetadatas", () => {
+  const packageMetadatas: PackageMetadata[] = [
+    new PackageMetadata({
+      mediaType: "mediaType 1",
+      description: "description 1",
+    }),
+    new PackageMetadata({
+      description: "description 2",
+      mediaType: "mediaType 2",
+    }),
+  ];
+  let mockGetAvailablePackageMetadatas: jest.Mock;
+  beforeEach(() => {
+    const response = new GetAvailablePackageMetadatasResponse({
+      packageMetadata: packageMetadatas,
+    });
+    mockGetAvailablePackageMetadatas = jest
+      .fn()
+      .mockImplementation(() => Promise.resolve(response));
+    jest
+      .spyOn(PackagesService, "getAvailablePackageMetadatas")
+      .mockImplementation(mockGetAvailablePackageMetadatas);
+  });
+
+  it("gets the package metadata", async () => {
+    const expectedActions = [
+      { type: getType(actions.availablepackages.requestAvailablePackageMetadatas) },
+      {
+        type: getType(actions.availablepackages.receiveAvailablePackageMetadatas),
+        payload: {
+          packageMetadata: packageMetadatas,
+        },
+      },
+    ];
+    await store.dispatch(
+      actions.availablepackages.fetchAvailablePackageMetadatas(
+        {
+          context: { cluster: cluster, namespace: namespace },
+          identifier: "foo",
+          plugin: plugin,
+        } as AvailablePackageReference,
+        "1.0.0",
+      ),
+    );
+    expect(store.getActions()).toEqual(expectedActions);
+    expect(mockGetAvailablePackageMetadatas.mock.calls[0]).toEqual([
+      {
+        context: { cluster: cluster, namespace: namespace },
+        identifier: "foo",
+        plugin: plugin,
+      } as AvailablePackageReference,
+      "1.0.0",
+    ]);
+  });
+
+  it("dispatches an error if it's unexpected", async () => {
+    jest.spyOn(PackagesService, "getAvailablePackageMetadatas").mockImplementation(() => {
+      throw new Error("Boom!");
+    });
+
+    const expectedActions = [
+      { type: getType(actions.availablepackages.requestAvailablePackageMetadatas) },
+      { type: getType(actions.availablepackages.createErrorPackage), payload: new Error("Boom!") },
+    ];
+    await store.dispatch(
+      actions.availablepackages.fetchAvailablePackageMetadatas(
         {
           context: { cluster: cluster, namespace: namespace },
           identifier: "foo",

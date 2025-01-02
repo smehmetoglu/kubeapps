@@ -1,13 +1,13 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2023 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 package paginate
 
 import (
+	"fmt"
 	"strconv"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	"github.com/bufbuild/connect-go"
 )
 
 // PageOffsetFromPageToken converts a page token to an integer offset
@@ -23,8 +23,8 @@ func PageOffsetFromPageToken(pageToken string) (int, error) {
 	}
 	offset, err := strconv.ParseInt(pageToken, 10, 0)
 	if err != nil {
-		return 0, status.Errorf(codes.InvalidArgument, "unable to interpret page token %q: %v",
-			pageToken, err)
+		return 0, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("Unable to interpret page token %q: %w",
+			pageToken, err))
 	}
 	return int(offset), nil
 }

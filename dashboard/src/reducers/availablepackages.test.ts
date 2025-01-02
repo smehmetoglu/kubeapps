@@ -1,12 +1,19 @@
-// Copyright 2021-2022 the Kubeapps contributors.
+// Copyright 2021-2024 the Kubeapps contributors.
 // SPDX-License-Identifier: Apache-2.0
 
-import { AvailablePackageSummary, Context } from "gen/kubeappsapis/core/packages/v1alpha1/packages";
-import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins";
+import {
+  AvailablePackageDetail,
+  AvailablePackageReference,
+  AvailablePackageSummary,
+  Context,
+  GetAvailablePackageSummariesResponse,
+  PackageAppVersion,
+} from "gen/kubeappsapis/core/packages/v1alpha1/packages_pb";
+import { Plugin } from "gen/kubeappsapis/core/plugins/v1alpha1/plugins_pb";
 import { getType } from "typesafe-actions";
 import actions from "../actions";
 import { IPackageState, IReceivePackagesActionPayload } from "../shared/types";
-import packageReducer from "./availablepackages";
+import packageReducer, { defaultValues } from "./availablepackages";
 import { PackagesAction } from "../actions/availablepackages";
 
 const nextPageToken = "nextPageToken";
@@ -14,33 +21,33 @@ const currentPageToken = "currentPageToken";
 
 describe("packageReducer", () => {
   let initialState: IPackageState;
-  const availablePackageSummary1: AvailablePackageSummary = {
+  const availablePackageSummary1 = new AvailablePackageSummary({
     name: "foo",
     categories: [""],
     displayName: "foo",
     iconUrl: "",
-    latestVersion: { appVersion: "v1.0.0", pkgVersion: "" },
+    latestVersion: new PackageAppVersion({ appVersion: "v1.0.0", pkgVersion: "" }),
     shortDescription: "",
-    availablePackageRef: {
+    availablePackageRef: new AvailablePackageReference({
       identifier: "foo/foo",
       context: { cluster: "", namespace: "package-namespace" } as Context,
       plugin: { name: "my.plugin", version: "0.0.1" } as Plugin,
-    },
-  };
+    }),
+  });
 
-  const availablePackageSummary2: AvailablePackageSummary = {
+  const availablePackageSummary2 = new AvailablePackageSummary({
     name: "bar",
     categories: ["Database"],
     displayName: "bar",
     iconUrl: "",
-    latestVersion: { appVersion: "v2.0.0", pkgVersion: "" },
+    latestVersion: new PackageAppVersion({ appVersion: "v2.0.0", pkgVersion: "" }),
     shortDescription: "",
-    availablePackageRef: {
+    availablePackageRef: new AvailablePackageReference({
       identifier: "bar/bar",
       context: { cluster: "", namespace: "package-namespace" } as Context,
       plugin: { name: "my.plugin", version: "0.0.1" } as Plugin,
-    },
-  };
+    }),
+  });
 
   beforeEach(() => {
     initialState = {
@@ -50,6 +57,7 @@ describe("packageReducer", () => {
       categories: [],
       selected: {
         versions: [],
+        metadatas: [],
       },
       nextPageToken: "",
       size: 20,
@@ -58,7 +66,7 @@ describe("packageReducer", () => {
   const error = new Error("Boom");
 
   it("unsets an error when changing namespace", () => {
-    const state = packageReducer(undefined, {
+    const state = packageReducer(initialState, {
       type: getType(actions.availablepackages.createErrorPackage) as any,
       payload: error,
     });
@@ -72,14 +80,14 @@ describe("packageReducer", () => {
     });
 
     expect(
-      packageReducer(undefined, {
+      packageReducer(initialState, {
         type: getType(actions.namespace.setNamespaceState) as any,
       }),
     ).toEqual({ ...initialState });
   });
 
   it("requestAvailablePackageSummaries (without page)", () => {
-    const state = packageReducer(undefined, {
+    const state = packageReducer(initialState, {
       type: getType(actions.availablepackages.requestAvailablePackageSummaries) as any,
     });
     expect(state).toEqual({
@@ -89,7 +97,7 @@ describe("packageReducer", () => {
   });
 
   it("requestAvailablePackageSummaries (with page)", () => {
-    const state = packageReducer(undefined, {
+    const state = packageReducer(initialState, {
       type: getType(actions.availablepackages.requestAvailablePackageSummaries) as any,
       payload: "currentPageToken",
     });
@@ -428,11 +436,11 @@ describe("packageReducer", () => {
     const state2 = packageReducer(state1, {
       type: getType(actions.availablepackages.receiveAvailablePackageSummaries) as any,
       payload: {
-        response: {
+        response: new GetAvailablePackageSummariesResponse({
           availablePackageSummaries: [],
           nextPageToken,
           categories: ["foo"],
-        },
+        }),
         paginationToken: currentPageToken,
       } as IReceivePackagesActionPayload,
     });
@@ -482,7 +490,7 @@ describe("packageReducer", () => {
   });
 
   it("resetAvailablePackageSummaries resets to the initial", () => {
-    const state = packageReducer(undefined, {
+    const state = packageReducer(initialState, {
       type: getType(actions.availablepackages.resetAvailablePackageSummaries) as any,
     });
     expect(state).toEqual({
@@ -491,11 +499,153 @@ describe("packageReducer", () => {
   });
 
   it("createErrorPackage resets to the initial state", () => {
-    const state = packageReducer(undefined, {
+    const state = packageReducer(initialState, {
       type: getType(actions.availablepackages.createErrorPackage) as any,
     });
     expect(state).toEqual({
       ...initialState,
     });
+  });
+
+  describe("receiveSelectedAvailablePackageDetail", () => {
+    const packageDetail = {
+      name: "test-package",
+      defaultValues: "default: values",
+      valuesSchema: "",
+    } as AvailablePackageDetail;
+
+    it("uses the package default values by default", () => {
+      const state = packageReducer(initialState, {
+        type: getType(actions.availablepackages.receiveSelectedAvailablePackageDetail) as any,
+        payload: {
+          selectedPackage: packageDetail,
+        },
+      });
+
+      expect(state.selected.values).toEqual("default: values");
+    });
+
+    it("uses the package custom default values if only one custom default values", () => {
+      const state = packageReducer(initialState, {
+        type: getType(actions.availablepackages.receiveSelectedAvailablePackageDetail) as any,
+        payload: {
+          selectedPackage: new AvailablePackageDetail({
+            ...packageDetail,
+            additionalDefaultValues: {
+              "values-custom": "custom: values",
+            },
+          }),
+        },
+      });
+
+      expect(state.selected.values).toEqual("custom: values");
+    });
+
+    it("uses the package default values if more than one custom default values present", () => {
+      const state = packageReducer(initialState, {
+        type: getType(actions.availablepackages.receiveSelectedAvailablePackageDetail) as any,
+        payload: {
+          selectedPackage: new AvailablePackageDetail({
+            ...packageDetail,
+            additionalDefaultValues: {
+              "values-custom": "custom: values",
+              "values-other": "more: customdefaultvalues",
+            },
+          }),
+        },
+      });
+
+      expect(state.selected.values).toEqual("default: values");
+    });
+  });
+
+  describe("setAvailablePackageDetailCustomDefaults", () => {
+    it("sets the custom default", () => {
+      const packageWithCustomDefaults = {
+        ...initialState,
+        selected: {
+          ...initialState.selected,
+          availablePackageDetail: new AvailablePackageDetail({
+            ...initialState.selected.availablePackageDetail!,
+            additionalDefaultValues: {
+              "values-custom": "custom: values",
+              "values-other": "more: customdefaultvalues",
+            },
+          }),
+          values: "default: values",
+        },
+      };
+      const state = packageReducer(packageWithCustomDefaults, {
+        type: getType(actions.availablepackages.setAvailablePackageDetailCustomDefaults),
+        payload: { customDefault: "values-other" },
+      }) as any;
+
+      expect(state.selected.values).toEqual("more: customdefaultvalues");
+    });
+  });
+});
+
+describe("defaultValues", () => {
+  const packageDetail = {
+    name: "test-package",
+    defaultValues: "default: values",
+    valuesSchema: "",
+    additionalDefaultValues: {},
+  } as AvailablePackageDetail;
+
+  it("returns the only defaults when values.yaml is the only default file", () => {
+    const result = defaultValues(packageDetail);
+
+    expect(result).toEqual("default: values");
+  });
+
+  it("returns the only defaults when values.yaml is the only default file, regardless of input", () => {
+    const result = defaultValues(packageDetail, "other-default");
+
+    expect(result).toEqual("default: values");
+  });
+
+  it("returns a custom default file when there is exactly one custom default in the pkg", () => {
+    const result = defaultValues(
+      new AvailablePackageDetail({
+        ...packageDetail,
+        additionalDefaultValues: {
+          "values-custom": "custom: values",
+        },
+      }),
+      "other-default",
+    );
+
+    expect(result).toEqual("custom: values");
+  });
+
+  it("returns the default file when there is more than one custom default in the pkg", () => {
+    const result = defaultValues(
+      new AvailablePackageDetail({
+        ...packageDetail,
+        additionalDefaultValues: {
+          "values-custom": "custom: values",
+          "other-custom": "other: values",
+        },
+      }),
+      "other-default",
+    );
+
+    expect(result).toEqual("default: values");
+  });
+
+  it("returns the specific custom default file when specified", () => {
+    const result = defaultValues(
+      new AvailablePackageDetail({
+        ...packageDetail,
+        additionalDefaultValues: {
+          "values-custom": "custom: values",
+          "other-custom": "other: values",
+        },
+      }),
+      "other-custom",
+    );
+
+    expect(result).toEqual("other: values");
   });
 });
